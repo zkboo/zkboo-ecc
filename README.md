@@ -1,4 +1,4 @@
-# ZKBoo-SHA2
+# ZKBoo-ECC
 
 ![Rust](https://img.shields.io/badge/rust-1.92+-orange.svg)
 [![Crates.io](https://img.shields.io/crates/v/zkboo.svg)](https://crates.io/crates/zkboo-ecc)
