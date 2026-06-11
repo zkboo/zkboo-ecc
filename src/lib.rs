@@ -6,3 +6,4 @@
 
 #![no_std]
 pub mod montgomery;
+pub mod secp256k1;
