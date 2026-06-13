@@ -512,12 +512,29 @@ impl<B: Backend, W: Word, const N: usize, C: Curve<W, N>> CurvePointRef<B, W, N,
     }
 
     /// Check if two points are equal, without affine conversion.
-    pub fn eq(self, _rhs: Self) -> bool {
-        unimplemented!("To be implemented as a branch-less version of Point::eq.")
+    ///
+    /// Branch-less (data-oblivious) analogue of [CurvePoint::eq]: works directly on the Jacobian
+    /// coordinates and returns a [BooleanWordRef] rather than branching on secret values. Two
+    /// points are equal iff (a) both are the point at infinity (`z == 0`), or (b) both are finite
+    /// and their affine coordinates coincide, i.e. `x1·z2² == x2·z1²` and `y1·z2³ == y2·z1³`.
+    pub fn eq(self, rhs: Self) -> BooleanWordRef<B> {
+        let (x1, y1, z1, curve1) = self.destructure();
+        let (x2, y2, z2, curve2) = rhs.destructure();
+        assert_eq!(curve1, curve2, "Cannot compare points on different curves.");
+        let inf1 = z1.clone().is_zero();
+        let inf2 = z2.clone().is_zero();
+        let z1z1 = z1.clone() * z1.clone();
+        let z2z2 = z2.clone() * z2.clone();
+        let eqx = (x1 * z2z2.clone()).eq(x2 * z1z1.clone());
+        let eqy = (y1 * z2z2 * z2).eq(y2 * z1z1 * z1);
+        let both_inf = inf1.clone() & inf2.clone();
+        let both_finite = !inf1 & !inf2;
+        // equal iff both at infinity, or both finite with matching affine coordinates.
+        return both_inf | (both_finite & eqx & eqy);
     }
 
     /// Check if two points are not equal, without affine conversion.
-    pub fn ne(self, rhs: Self) -> bool {
+    pub fn ne(self, rhs: Self) -> BooleanWordRef<B> {
         return !self.eq(rhs);
     }
 }
@@ -631,12 +648,10 @@ impl<B: Backend, W: Word, const N: usize, C: Curve<W, N>> Mul<CompositeWord<W, N
     for CurvePointRef<B, W, N, C>
 {
     type Output = Self;
-    /// Point multiplication by a scalar on the [Curve].
-    /// ⚠️ This method is not constant-time, do not use with secret scalars.
+    /// Point multiplication by a **public** (cleartext) scalar on the [Curve].
     fn mul(self, rhs: CompositeWord<W, N>) -> Self::Output {
         let mut res = self.clone().into_inf();
         let mut addend = self;
-        // TODO: change to constant-time implementation, e.g. Montgomery lagger.
         rhs.map_bits(|bit| {
             if bit {
                 res += addend.clone();
@@ -658,11 +673,10 @@ impl<B: Backend, W: Word, const N: usize, C: Curve<W, N>> Mul<WordRef<B, W, N>>
     for CurvePointRef<B, W, N, C>
 {
     type Output = Self;
-    /// Point multiplication by a scalar on the [Curve].
+    /// Point multiplication by a **secret** (circuit-value) scalar on the [Curve].
     fn mul(self, rhs: WordRef<B, W, N>) -> Self::Output {
         let mut res = self.clone().into_inf();
         let mut addend = self;
-        // TODO: change to constant-time implementation, e.g. Montgomery lagger.
         rhs.map_bits(|bit| {
             res = bit.point_select(res.clone() + addend.clone(), res.clone());
             addend = addend.clone().double();
