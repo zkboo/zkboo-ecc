@@ -293,6 +293,63 @@ macro_rules! test_func {
     };
 }
 
+/// Evaluate the data-oblivious `CurvePointRef::eq` (circuit version) on two points via the
+/// execution backend, returning the resulting boolean as a `u8` (1 = equal, 0 = not equal).
+fn eq_bit(a: CurvePoint<u64, 4, SECP256K1>, b: CurvePoint<u64, 4, SECP256K1>) -> u8 {
+    type WP = OwnedFlexibleWordPool<usize>;
+    struct EqCircuit {
+        a: CurvePoint<u64, 4, SECP256K1>,
+        b: CurvePoint<u64, 4, SECP256K1>,
+    }
+    impl Circuit for EqCircuit {
+        fn exec<B: Backend>(&self, frontend: &Frontend<B>) {
+            let a = frontend.point_alloc(self.a);
+            let b = frontend.point_alloc(self.b);
+            frontend.output(a.eq(b).into());
+        }
+    }
+    return exec::<_, WP>(&EqCircuit { a, b }).u8[0];
+}
+
+#[test]
+fn test_eq() {
+    let curve = SECP256K1;
+    let z = curve.zero();
+    let g = curve.g();
+    let g2 = g.double();
+
+    // Spot-check the expected boolean directly.
+    assert_eq!(eq_bit(g, g), 1, "g == g must be true");
+    assert_eq!(eq_bit(z, z), 1, "0 == 0 must be true");
+    assert_eq!(eq_bit(g, z), 0, "g == 0 must be false");
+    assert_eq!(eq_bit(z, g), 0, "0 == g must be false");
+    assert_eq!(eq_bit(g, g2), 0, "g == 2g must be false");
+    assert_eq!(eq_bit(g, -g), 0, "g == -g must be false");
+    // Representation-independence: a Jacobian point equals its affine form (different z, same point).
+    assert_eq!(eq_bit(g2, g2.to_affine()), 1, "2g (Jacobian) == 2g (affine) must be true");
+    assert_eq!(eq_bit(g2.to_affine(), g2), 1, "2g (affine) == 2g (Jacobian) must be true");
+
+    // Exhaustively cross-check the circuit `eq` against the trusted cleartext `Point::eq` over a
+    // spread of real secp256k1 points (finite, infinite, and mixed Jacobian/affine forms).
+    let points = [
+        z,
+        g,
+        -g,
+        g2,
+        g2.to_affine(),
+        g2 + g,
+        g2 - g,
+        g2.double(),
+        (g2 + g).to_affine(),
+    ];
+    for &a in &points {
+        for &b in &points {
+            let expected = a.eq(b) as u8;
+            assert_eq!(eq_bit(a, b), expected, "circuit eq disagrees with cleartext Point::eq");
+        }
+    }
+}
+
 #[test]
 fn test_double() {
     test_func!(test_double, in_, { in_.double() });
