@@ -19,7 +19,7 @@ use zkboo::backend::{Backend, Frontend};
 use zkboo::circuit::Circuit;
 use zkboo::word::CompositeWord;
 use zkboo_ecc::montgomery::{Curve, PointFrontendIO};
-use zkboo_ecc::secp256k1::{Secp256k1, Secp256k1Field};
+use zkboo_ecc::secp256k1::{Secp256k1, Secp256k1Field, Secp256k1PM};
 use zkboo_modular::montgomery::MontgomeryWordRef;
 use zkboo_profiling::profile;
 
@@ -69,12 +69,20 @@ impl Circuit for ScalarMulLadder {
         fe.point_output_affine(p * d);
     }
 }
-/// Same elephant via the fixed-base comb (G is a build-time constant).
+/// Same elephant via the fixed-base comb (G is a build-time constant), Montgomery field.
 struct ScalarMulFixedBase;
 impl Circuit for ScalarMulFixedBase {
     fn exec<B: Backend>(&self, fe: &Frontend<B>) {
         let d = a_word(fe);
         fe.point_output_affine(Secp256k1.g().mul_secret_scalar(d));
+    }
+}
+/// Fixed-base comb over the pseudo-Mersenne field (same curve, cheaper reduction).
+struct ScalarMulFixedBasePM;
+impl Circuit for ScalarMulFixedBasePM {
+    fn exec<B: Backend>(&self, fe: &Frontend<B>) {
+        let d = a_word(fe);
+        fe.point_output_affine(Secp256k1PM.g().mul_secret_scalar(d));
     }
 }
 
@@ -93,5 +101,6 @@ fn main() {
     report("point double", &PointDouble);
     report("point add", &PointAdd);
     report("scalar mul d·G (ladder)", &ScalarMulLadder);
-    report("scalar mul d·G (fixed-base)", &ScalarMulFixedBase);
+    report("scalar mul d·G (fixed-base, Mont)", &ScalarMulFixedBase);
+    report("scalar mul d·G (fixed-base, PM)", &ScalarMulFixedBasePM);
 }

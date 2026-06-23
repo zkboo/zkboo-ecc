@@ -11,6 +11,7 @@ use zkboo::{
     backend::{Backend, BooleanWordRef, Frontend, WordRef},
     word::{CompositeWord, Word, WordLike},
 };
+use zkboo_modular::field::FieldRep;
 use zkboo_modular::montgomery::{
     MontgomeryBooleanWordRefSelector, MontgomeryFrontendIO, MontgomeryMod, MontgomeryWord,
     MontgomeryWordRef,
@@ -19,7 +20,7 @@ use zkboo_modular::montgomery::{
 /// An elliptic curve in short Weierstrass form, defined by the equation `y^2 = x^3 + ax + b`
 /// over a prime field, with coefficients in Montgomery form.
 pub trait Curve<W: Word, const N: usize>: Clone + Copy + PartialEq + Eq + Debug {
-    type P: MontgomeryMod<W, N>;
+    type P: FieldRep<W, N>;
 
     /// The modulus of the underlying prime field, with modular operations in Montgomery form.
     fn p(&self) -> Self::P;
@@ -177,7 +178,13 @@ impl<W: Word, const N: usize, C: Curve<W, N>> CurvePoint<W, N, C> {
     }
 
     /// Convert the point to affine representation.
-    pub fn to_affine(self) -> Self {
+    ///
+    /// Available only for Montgomery fields, as it uses the build-time constant inverse
+    /// [`MontgomeryWord::inv`]. The in-circuit [`CurvePointRef::to_affine`] works for any field.
+    pub fn to_affine(self) -> Self
+    where
+        C::P: MontgomeryMod<W, N>,
+    {
         if self.is_inf() {
             return self;
         }
@@ -339,7 +346,7 @@ impl<W: Word, const N: usize, C: Curve<W, N>> CurvePoint<W, N, C> {
 
 /// Oblivious mux of one constant [MontgomeryWord] out of `2^bits.len()` by the given secret bits
 /// (little-endian: `bits[0]` is the low bit of the index).
-fn select_const_coord<B: Backend, W: Word, const N: usize, M: MontgomeryMod<W, N>>(
+fn select_const_coord<B: Backend, W: Word, const N: usize, M: FieldRep<W, N>>(
     bits: &[BooleanWordRef<B>],
     consts: &[MontgomeryWord<W, N, M>],
 ) -> MontgomeryWordRef<B, W, N, M> {
