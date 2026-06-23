@@ -15,3 +15,4 @@ zkboo-modular = "0.1.0"
 
 [dev-dependencies]
 zkboo = { version = "0.1.0", features = ["u64"] }
+zkboo-profiling = "0.1.0"
