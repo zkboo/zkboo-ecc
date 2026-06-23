@@ -86,12 +86,15 @@ impl Circuit for ScalarMulFixedBasePM {
     }
 }
 
+// Production soundness: 219 responses = 64-bit post-quantum / 128-bit classical (zkboo n_eps(64)).
+const NUM_ITERS: usize = 219;
+
 fn report<C: Circuit>(label: &str, c: &C) {
     let data = profile(c);
     let nl = data.and_msg_size().sum();
-    // Each nonlinear machine-word message is 8 bytes (u64) of one party's view.
-    let kib = (nl as f64) * 8.0 / 1024.0;
-    println!("{label:<26} nl_and_msgs = {nl:>10}   ({kib:>10.1} KiB/party)");
+    // Full proof size in bytes at the production repetition count, with 32-byte Keccak digests/seeds.
+    let proof_mib = data.proof_size::<[u8; 32], [u8; 32]>(NUM_ITERS) as f64 / (1024.0 * 1024.0);
+    println!("{label:<34} nl_and_msgs = {nl:>10}   proof @219 = {proof_mib:>9.1} MiB");
 }
 
 fn main() {
