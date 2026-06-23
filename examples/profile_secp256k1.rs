@@ -60,12 +60,21 @@ impl Circuit for PointAdd {
     }
 }
 /// The elephant: d·G for a secret scalar d, output in affine form (includes one inversion).
-struct ScalarMul;
-impl Circuit for ScalarMul {
+/// Generic double-and-add ladder (base treated as a circuit variable).
+struct ScalarMulLadder;
+impl Circuit for ScalarMulLadder {
     fn exec<B: Backend>(&self, fe: &Frontend<B>) {
         let p = fe.point_input(Secp256k1.g());
         let d = a_word(fe);
         fe.point_output_affine(p * d);
+    }
+}
+/// Same elephant via the fixed-base comb (G is a build-time constant).
+struct ScalarMulFixedBase;
+impl Circuit for ScalarMulFixedBase {
+    fn exec<B: Backend>(&self, fe: &Frontend<B>) {
+        let d = a_word(fe);
+        fe.point_output_affine(Secp256k1.g().mul_secret_scalar(d));
     }
 }
 
@@ -83,5 +92,6 @@ fn main() {
     report("field inv (safegcd)", &FieldInv);
     report("point double", &PointDouble);
     report("point add", &PointAdd);
-    report("scalar mul d·G (secret)", &ScalarMul);
+    report("scalar mul d·G (ladder)", &ScalarMulLadder);
+    report("scalar mul d·G (fixed-base)", &ScalarMulFixedBase);
 }

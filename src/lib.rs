@@ -5,5 +5,6 @@
 //! 🚧 Warning: This crate is work in progress. Implementation may be incomplete or inefficient. 🚧
 
 #![no_std]
+extern crate alloc;
 pub mod montgomery;
 pub mod secp256k1;
