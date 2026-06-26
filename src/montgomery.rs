@@ -111,6 +111,45 @@ pub trait Curve<W: Word, const N: usize>: Clone + Copy + PartialEq + Eq + Debug 
         let z6 = z4 * z2;
         return y * y == x * x * x + a * x * z4 + b * z6;
     }
+
+    /// Fixed-base scalar multiplication by a **secret** (circuit-value) scalar, data-oblivious.
+    ///
+    /// The base point is whichever point `tables` were built for. Decomposing the scalar into
+    /// `w`-bit windows (`w = tables.window_bits()`), `d·base = Σ_k T_k[w_k]` where
+    /// `T_k[j] = j · 2^{w·k} · base` is supplied by `tables`, so the in-circuit work is just
+    /// `⌈WIDTH/w⌉` oblivious selects and additions — and **no in-circuit doublings** (the
+    /// dominant cost of the generic double-and-add ladder). The table multiples are public and
+    /// scalar-independent; `tables` decides whether they are computed on demand, loaded from
+    /// flash, or held in RAM, and is the natural place for any platform concern (e.g. servicing
+    /// a watchdog) to live, keeping it out of this circuit math.
+    ///
+    /// Data-oblivious: the selects iterate every window position and use the secret window bits
+    /// only to drive `montgomery_select`, so the gate sequence is independent of the scalar.
+    ///
+    /// See [`CurvePoint::mul_secret_scalar`] for the convenience form (default on-demand tables).
+    fn mul_secret_scalar<B: Backend>(
+        &self,
+        scalar: WordRef<B, W, N>,
+        tables: &mut impl WindowTables<W, N, Self>,
+    ) -> CurvePointRef<B, W, N, Self> {
+        let width = W::WIDTH * N;
+        let w = tables.window_bits();
+        let mut res: Option<CurvePointRef<B, W, N, Self>> = None;
+        for k in 0..width.div_ceil(w) {
+            let bits_in_window = core::cmp::min(w, width - k * w);
+            // Oblivious select of T_k[w_k] by the secret window bits, then accumulate.
+            let window_bits: Vec<BooleanWordRef<B>> = (0..bits_in_window)
+                .map(|i| scalar.clone().bit_at(k * w + i))
+                .collect();
+            let selected = select_const_point(&window_bits, tables.window(k), *self);
+            res = Some(match res {
+                None => selected,
+                Some(r) => r + selected,
+            });
+        }
+        // `width >= 1`, so there is at least one window and `res` is always set.
+        return res.expect("at least one window");
+    }
 }
 
 /// A point on an elliptic curve in short Weierstrass form, in Jacobian representation,
@@ -277,21 +316,21 @@ impl<W: Word, const N: usize, C: Curve<W, N>> CurvePoint<W, N, C> {
         return !self.eq(rhs);
     }
 
-    /// Fixed-base scalar multiplication by a **secret** (circuit-value) scalar, data-oblivious.
+    /// Fixed-base scalar multiplication of this base point by a **secret** (circuit-value)
+    /// scalar, data-oblivious, computing the window tables on demand at the default window
+    /// width ([`DEFAULT_COMB_WINDOW_BITS`]).
     ///
-    /// Because this base point is a public constant, every multiple `2^i · self` is known at
-    /// circuit-build time. Decomposing the scalar into `w`-bit windows, `d·self = Σ_k T_k[w_k]`
-    /// where `T_k[j] = j · 2^{w·k} · self` is a build-time table, so the in-circuit work is just
-    /// `⌈WIDTH/w⌉` oblivious table selects and additions — and **no in-circuit doublings** (the
-    /// dominant cost of the generic double-and-add ladder). For secp256k1 this is roughly an
-    /// order of magnitude cheaper than [`CurvePointRef::mul`] by a secret scalar.
+    /// This is the convenience form of [`Curve::mul_secret_scalar`]: it builds a
+    /// [`ComputedWindowTables`] for this base point and multiplies. For control over the
+    /// window width, or to supply a different table source — flash-resident tables, or
+    /// on-demand computation that services a platform watchdog while the native table
+    /// arithmetic runs — build a [`WindowTables`] yourself and call
+    /// [`Curve::mul_secret_scalar`] directly.
     ///
-    /// Data-oblivious: the table selects iterate every window position and use the secret window
-    /// bits only to drive `montgomery_select`, so the gate sequence is independent of the scalar.
-    ///
-    /// The window width [`W_BITS`](Self::mul_secret_scalar) trades nonlinear gates against the
-    /// per-window table size (`2^w` points, rebuilt each window, so it bounds peak memory).
-    /// Measured for a full secp256k1 `d·G` (vs. 39.3M nonlinear and_msgs for the ladder):
+    /// For secp256k1 this is roughly an order of magnitude cheaper than [`CurvePointRef::mul`]
+    /// by a secret scalar. The window width trades nonlinear gates against the per-window
+    /// table size (`2^w` points); measured for a full secp256k1 `d·G` (vs. 39.3M nonlinear
+    /// and_msgs for the ladder):
     ///
     /// | w | nl and_msgs | speedup | peak table |
     /// |---|------------:|--------:|-----------:|
@@ -299,48 +338,13 @@ impl<W: Word, const N: usize, C: Curve<W, N>> CurvePoint<W, N, C> {
     /// | 6 |   5,088,909 |   7.7×  |  64 points |
     /// | 8 |   3,866,423 |  10.2×  | 256 points |
     /// |10 |   3,373,355 |  11.6×  |1024 points |
-    ///
-    /// `w = 6` is the default: a strong reduction with a small (~6 KiB) table, suitable for the
-    /// memory-constrained on-device prover. Raise it for host proving where memory is ample.
     pub fn mul_secret_scalar<B: Backend>(
         self,
         scalar: WordRef<B, W, N>,
     ) -> CurvePointRef<B, W, N, C> {
-        const W_BITS: usize = 6;
-        let width = W::WIDTH * N;
-        let num_windows = width.div_ceil(W_BITS);
         let curve = self.curve;
-
-        let mut res: Option<CurvePointRef<B, W, N, C>> = None;
-        // `base_k` is `2^{W_BITS·k} · self`, advanced by `W_BITS` doublings per window.
-        let mut base_k = self;
-        for k in 0..num_windows {
-            let bits_in_window = core::cmp::min(W_BITS, width - k * W_BITS);
-            // Build the window table T_k[j] = j · base_k incrementally (native, build-time):
-            // T_k[0] = ∞, T_k[j] = T_k[j-1] + base_k.
-            let mut table: Vec<[MontgomeryWord<W, N, C::P>; 3]> =
-                Vec::with_capacity(1usize << bits_in_window);
-            let mut acc = curve.zero();
-            table.push(acc.coords());
-            for _ in 1..(1usize << bits_in_window) {
-                acc = acc + base_k;
-                table.push(acc.coords());
-            }
-            // Oblivious select of T_k[w_k] by the secret window bits, then accumulate.
-            let window_bits: Vec<BooleanWordRef<B>> = (0..bits_in_window)
-                .map(|i| scalar.clone().bit_at(k * W_BITS + i))
-                .collect();
-            let selected = select_const_point(&window_bits, &table, curve);
-            res = Some(match res {
-                None => selected,
-                Some(r) => r + selected,
-            });
-            for _ in 0..W_BITS {
-                base_k = base_k.double();
-            }
-        }
-        // `width >= 1`, so `num_windows >= 1` and `res` is always set.
-        return res.expect("at least one window");
+        let mut tables = ComputedWindowTables::new(self, DEFAULT_COMB_WINDOW_BITS);
+        return curve.mul_secret_scalar(scalar, &mut tables);
     }
 }
 
@@ -385,6 +389,97 @@ fn select_const_point<B: Backend, W: Word, const N: usize, C: Curve<W, N>>(
         select_const_coord(bits, &zs),
         curve,
     );
+}
+
+/// Default comb window width for [`CurvePoint::mul_secret_scalar`] — a strong reduction in
+/// nonlinear gates with a small (~6 KiB) per-window table, suitable for a memory-constrained
+/// on-device prover. Host proving with ample memory can use a wider window via
+/// [`Curve::mul_secret_scalar`] with a custom [`WindowTables`].
+pub const DEFAULT_COMB_WINDOW_BITS: usize = 6;
+
+/// Supplies the per-window point tables for fixed-base comb scalar multiplication
+/// ([`Curve::mul_secret_scalar`] / [`CurvePoint::mul_secret_scalar`]).
+///
+/// For a base point `P`, window width `w = window_bits()`, and window index `k`, the table for
+/// window `k` holds the multiples
+///
+/// ```text
+///   table[j] = j · 2^{w·k} · P ,   j = 0 .. 2^{bits_in_window(k)}
+/// ```
+///
+/// (the final window may be narrower than `w`). These multiples depend only on the public base
+/// point and the windowing — never on the scalar, the witness, or the proof — so a source may
+/// compute them on demand, load them from flash, or hold them in RAM. The on-demand path is also
+/// the natural home for any platform concern (e.g. servicing a secure-element watchdog while the
+/// native arithmetic runs), keeping it out of the circuit math entirely.
+pub trait WindowTables<W: Word, const N: usize, C: Curve<W, N>> {
+    /// The window width `w` in bits; the scalar is consumed `w` bits at a time.
+    fn window_bits(&self) -> usize;
+
+    /// The table for window `k`: entry `j` is `j · 2^{window_bits·k} · base`.
+    ///
+    /// Borrowed from the source, so a compute-on-demand implementation may hand back a single
+    /// reused buffer (bounding peak memory to one window's `2^w` points). Sources that generate
+    /// sequentially by incremental doubling require `k` in ascending order `0, 1, 2, …`;
+    /// random-access sources (flash, RAM) accept any `k`.
+    fn window(&mut self, k: usize) -> &[[MontgomeryWord<W, N, C::P>; 3]];
+}
+
+/// The default [`WindowTables`]: builds each window's table on demand by native point
+/// arithmetic — exactly what the comb did inline before. Holds the running base
+/// `base_k = 2^{window_bits·k} · base` and one reused buffer, so peak memory is a single
+/// window's table. Requires windows in ascending order.
+#[derive(Debug, Clone)]
+pub struct ComputedWindowTables<W: Word, const N: usize, C: Curve<W, N>> {
+    curve: C,
+    base_k: CurvePoint<W, N, C>,
+    next_k: usize,
+    window_bits: usize,
+    buf: Vec<[MontgomeryWord<W, N, C::P>; 3]>,
+}
+
+impl<W: Word, const N: usize, C: Curve<W, N>> ComputedWindowTables<W, N, C> {
+    /// A comb-table source for `base`, with the given window width.
+    pub fn new(base: CurvePoint<W, N, C>, window_bits: usize) -> Self {
+        return Self {
+            curve: base.curve(),
+            base_k: base,
+            next_k: 0,
+            window_bits,
+            buf: Vec::with_capacity(1usize << window_bits),
+        };
+    }
+}
+
+impl<W: Word, const N: usize, C: Curve<W, N>> WindowTables<W, N, C>
+    for ComputedWindowTables<W, N, C>
+{
+    #[inline]
+    fn window_bits(&self) -> usize {
+        return self.window_bits;
+    }
+
+    fn window(&mut self, k: usize) -> &[[MontgomeryWord<W, N, C::P>; 3]] {
+        debug_assert_eq!(k, self.next_k, "windows must be requested in ascending order");
+        let width = W::WIDTH * N;
+        let bits_in_window = core::cmp::min(self.window_bits, width - k * self.window_bits);
+
+        // Rebuild T_k[j] = j · base_k incrementally into the reused buffer.
+        self.buf.clear();
+        let mut acc = self.curve.zero();
+        self.buf.push(acc.coords());
+        for _ in 1..(1usize << bits_in_window) {
+            acc = acc + self.base_k;
+            self.buf.push(acc.coords());
+        }
+
+        // Advance base_k to 2^{window_bits·(k+1)} · base for the next window.
+        for _ in 0..self.window_bits {
+            self.base_k = self.base_k.double();
+        }
+        self.next_k = k + 1;
+        return &self.buf;
+    }
 }
 
 impl<W: Word, const N: usize, C: Curve<W, N>> Neg for CurvePoint<W, N, C> {
