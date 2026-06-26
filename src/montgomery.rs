@@ -392,10 +392,11 @@ fn select_const_point<B: Backend, W: Word, const N: usize, C: Curve<W, N>>(
 }
 
 /// Default comb window width for [`CurvePoint::mul_secret_scalar`] — a strong reduction in
-/// nonlinear gates with a small (~6 KiB) per-window table, suitable for a memory-constrained
-/// on-device prover. Host proving with ample memory can use a wider window via
-/// [`Curve::mul_secret_scalar`] with a custom [`WindowTables`].
-pub const DEFAULT_COMB_WINDOW_BITS: usize = 6;
+/// nonlinear gates with a small per-window table (`2^w` points, ~3 KiB at `w = 5`), suitable for a
+/// memory- and flash-constrained on-device prover: at this width the full base-point table fits the
+/// device's app flash. Host proving with ample memory can use a wider window (fewer gates, smaller
+/// proof) via [`Curve::mul_secret_scalar`] with a custom [`WindowTables`].
+pub const DEFAULT_COMB_WINDOW_BITS: usize = 5;
 
 /// Supplies the per-window point tables for fixed-base comb scalar multiplication
 /// ([`Curve::mul_secret_scalar`] / [`CurvePoint::mul_secret_scalar`]).
