@@ -354,7 +354,9 @@ pub(crate) fn select_const_coord<B: Backend, W: Word, const N: usize, M: FieldRe
     bits: &[BooleanWordRef<B>],
     consts: &[MontgomeryWord<W, N, M>],
 ) -> MontgomeryWordRef<B, W, N, M> {
-    debug_assert_eq!(consts.len(), 1 << bits.len());
+    // Hard assert (not debug-only): a mis-sized table from a custom `WindowTables` impl would
+    // otherwise silently mux the wrong constant into this soundness-critical selection in release.
+    assert_eq!(consts.len(), 1 << bits.len());
     // First level selects between pairs of constants by the low bit.
     let mut layer: Vec<MontgomeryWordRef<B, W, N, M>> = consts
         .chunks(2)
@@ -465,6 +467,7 @@ impl<W: Word, const N: usize, C: Curve<W, N>> WindowTables<W, N, C>
     }
 
     fn window(&mut self, k: usize) -> &[[MontgomeryWord<W, N, C::P>; 3]] {
+        let width = W::WIDTH * N;
         if k == 0 {
             self.base_k = self.base;
             self.next_k = 0;
@@ -473,7 +476,10 @@ impl<W: Word, const N: usize, C: Curve<W, N>> WindowTables<W, N, C>
             k, self.next_k,
             "windows must be requested in ascending order (or restarting from 0)"
         );
-        let width = W::WIDTH * N;
+        assert!(
+            k * self.window_bits < width,
+            "window index past the last window of the scalar"
+        );
         let bits_in_window = core::cmp::min(self.window_bits, width - k * self.window_bits);
 
         // Rebuild T_k[j] = j · base_k incrementally into the reused buffer.
