@@ -350,7 +350,7 @@ impl<W: Word, const N: usize, C: Curve<W, N>> CurvePoint<W, N, C> {
 
 /// Oblivious mux of one constant [MontgomeryWord] out of `2^bits.len()` by the given secret bits
 /// (little-endian: `bits[0]` is the low bit of the index).
-fn select_const_coord<B: Backend, W: Word, const N: usize, M: FieldRep<W, N>>(
+pub(crate) fn select_const_coord<B: Backend, W: Word, const N: usize, M: FieldRep<W, N>>(
     bits: &[BooleanWordRef<B>],
     consts: &[MontgomeryWord<W, N, M>],
 ) -> MontgomeryWordRef<B, W, N, M> {
