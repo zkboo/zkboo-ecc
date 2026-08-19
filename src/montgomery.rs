@@ -368,7 +368,10 @@ fn select_const_coord<B: Backend, W: Word, const N: usize, M: FieldRep<W, N>>(
     for bit in bits.iter().skip(1) {
         layer = layer
             .chunks(2)
-            .map(|pair| bit.clone().montgomery_select(pair[1].clone(), pair[0].clone()))
+            .map(|pair| {
+                bit.clone()
+                    .montgomery_select(pair[1].clone(), pair[0].clone())
+            })
             .collect();
     }
     return layer.into_iter().next().expect("non-empty mux");
@@ -421,18 +424,18 @@ pub trait WindowTables<W: Word, const N: usize, C: Curve<W, N>> {
     ///
     /// Borrowed from the source, so a compute-on-demand implementation may hand back a single
     /// reused buffer (bounding peak memory to one window's `2^w` points). Sources that generate
-    /// sequentially by incremental doubling require `k` in ascending order `0, 1, 2, …`;
-    /// random-access sources (flash, RAM) accept any `k`.
+    /// sequentially by incremental doubling require `k` in ascending order `0, 1, 2, …`, with a
+    /// request for window `0` restarting the sequence (so one source serves several scalar
+    /// multiplications by the same base in turn); random-access sources (flash, RAM) accept any `k`.
     fn window(&mut self, k: usize) -> &[[MontgomeryWord<W, N, C::P>; 3]];
 }
 
-/// The default [`WindowTables`]: builds each window's table on demand by native point
-/// arithmetic — exactly what the comb did inline before. Holds the running base
-/// `base_k = 2^{window_bits·k} · base` and one reused buffer, so peak memory is a single
-/// window's table. Requires windows in ascending order.
+/// The default [`WindowTables`]: builds each window's table on demand by native point arithmetic —
+/// exactly what the comb did inline before.
 #[derive(Debug, Clone)]
 pub struct ComputedWindowTables<W: Word, const N: usize, C: Curve<W, N>> {
     curve: C,
+    base: CurvePoint<W, N, C>,
     base_k: CurvePoint<W, N, C>,
     next_k: usize,
     window_bits: usize,
@@ -444,6 +447,7 @@ impl<W: Word, const N: usize, C: Curve<W, N>> ComputedWindowTables<W, N, C> {
     pub fn new(base: CurvePoint<W, N, C>, window_bits: usize) -> Self {
         return Self {
             curve: base.curve(),
+            base,
             base_k: base,
             next_k: 0,
             window_bits,
@@ -461,7 +465,14 @@ impl<W: Word, const N: usize, C: Curve<W, N>> WindowTables<W, N, C>
     }
 
     fn window(&mut self, k: usize) -> &[[MontgomeryWord<W, N, C::P>; 3]] {
-        debug_assert_eq!(k, self.next_k, "windows must be requested in ascending order");
+        if k == 0 {
+            self.base_k = self.base;
+            self.next_k = 0;
+        }
+        assert_eq!(
+            k, self.next_k,
+            "windows must be requested in ascending order (or restarting from 0)"
+        );
         let width = W::WIDTH * N;
         let bits_in_window = core::cmp::min(self.window_bits, width - k * self.window_bits);
 

@@ -326,8 +326,16 @@ fn test_eq() {
     assert_eq!(eq_bit(g, g2), 0, "g == 2g must be false");
     assert_eq!(eq_bit(g, -g), 0, "g == -g must be false");
     // Representation-independence: a Jacobian point equals its affine form (different z, same point).
-    assert_eq!(eq_bit(g2, g2.to_affine()), 1, "2g (Jacobian) == 2g (affine) must be true");
-    assert_eq!(eq_bit(g2.to_affine(), g2), 1, "2g (affine) == 2g (Jacobian) must be true");
+    assert_eq!(
+        eq_bit(g2, g2.to_affine()),
+        1,
+        "2g (Jacobian) == 2g (affine) must be true"
+    );
+    assert_eq!(
+        eq_bit(g2.to_affine(), g2),
+        1,
+        "2g (affine) == 2g (Jacobian) must be true"
+    );
 
     // Exhaustively cross-check the circuit `eq` against the trusted cleartext `Point::eq` over a
     // spread of real secp256k1 points (finite, infinite, and mixed Jacobian/affine forms).
@@ -345,7 +353,11 @@ fn test_eq() {
     for &a in &points {
         for &b in &points {
             let expected = a.eq(b) as u8;
-            assert_eq!(eq_bit(a, b), expected, "circuit eq disagrees with cleartext Point::eq");
+            assert_eq!(
+                eq_bit(a, b),
+                expected,
+                "circuit eq disagrees with cleartext Point::eq"
+            );
         }
     }
 }

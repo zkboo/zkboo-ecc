@@ -10,7 +10,7 @@
 use zkboo::{
     backend::{Backend, Frontend},
     circuit::Circuit,
-    executor::{exec, OwnedFlexibleWordPool},
+    executor::{OwnedFlexibleWordPool, exec},
     word::{CompositeWord, Words},
 };
 use zkboo_ecc::montgomery::{Curve, PointFrontendIO};
@@ -36,7 +36,10 @@ fn check(scalar: CompositeWord<u64, 4>) {
     let outputs = exec::<_, WP>(&FixedBaseEqNative { scalar });
     let mut expected = Words::new();
     expected.as_vec_mut::<u8>().push(1); // true
-    assert_eq!(outputs, expected, "fixed-base mul wrong for scalar={scalar:?}");
+    assert_eq!(
+        outputs, expected,
+        "fixed-base mul wrong for scalar={scalar:?}"
+    );
 }
 
 #[test]
