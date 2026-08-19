@@ -10,7 +10,7 @@ use dashu_int::UBig;
 use zkboo::{
     backend::{Backend, Frontend},
     circuit::Circuit,
-    executor::{exec, OwnedFlexibleWordPool},
+    executor::{OwnedFlexibleWordPool, exec},
     word::{CompositeWord, Words},
 };
 use zkboo_ecc::montgomery::{Curve, CurvePoint};
@@ -72,7 +72,10 @@ fn pm_curve_matches_montgomery_native() {
     ]);
     let mont = coords(&(Secp256k1.g() * scalar));
     let pm = coords(&(Secp256k1PM.g() * scalar));
-    assert!(jacobian_eq(mont, pm), "PM vs Montgomery mismatch (full width)");
+    assert!(
+        jacobian_eq(mont, pm),
+        "PM vs Montgomery mismatch (full width)"
+    );
 }
 
 /// Circuit: output 1 iff the PM fixed-base comb agrees with the native PM scalar multiplication.
@@ -90,14 +93,15 @@ impl Circuit for PmFixedBaseEqNative {
 
 #[test]
 fn pm_fixed_base_circuit() {
-    for d in [CompositeWord::<u64, 4>::from_le_words([7, 0, 0, 0]),
+    for d in [
+        CompositeWord::<u64, 4>::from_le_words([7, 0, 0, 0]),
         CompositeWord::<u64, 4>::from_le_words([
             0x0123456789abcdef,
             0xfedcba9876543210,
             0x13579bdf02468ace,
             0x0f1e2d3c4b5a6978,
-        ])]
-    {
+        ]),
+    ] {
         let outputs = exec::<_, WP>(&PmFixedBaseEqNative { scalar: d });
         let mut expected = Words::new();
         expected.as_vec_mut::<u8>().push(1);
