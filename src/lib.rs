@@ -6,5 +6,6 @@
 
 #![no_std]
 extern crate alloc;
+pub mod edwards;
 pub mod montgomery;
 pub mod secp256k1;
