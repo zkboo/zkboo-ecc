@@ -113,20 +113,6 @@ pub trait Curve<W: Word, const N: usize>: Clone + Copy + PartialEq + Eq + Debug 
     }
 
     /// Fixed-base scalar multiplication by a **secret** (circuit-value) scalar, data-oblivious.
-    ///
-    /// The base point is whichever point `tables` were built for. Decomposing the scalar into
-    /// `w`-bit windows (`w = tables.window_bits()`), `d·base = Σ_k T_k[w_k]` where
-    /// `T_k[j] = j · 2^{w·k} · base` is supplied by `tables`, so the in-circuit work is just
-    /// `⌈WIDTH/w⌉` oblivious selects and additions — and **no in-circuit doublings** (the
-    /// dominant cost of the generic double-and-add ladder). The table multiples are public and
-    /// scalar-independent; `tables` decides whether they are computed on demand, loaded from
-    /// flash, or held in RAM, and is the natural place for any platform concern (e.g. servicing
-    /// a watchdog) to live, keeping it out of this circuit math.
-    ///
-    /// Data-oblivious: the selects iterate every window position and use the secret window bits
-    /// only to drive `montgomery_select`, so the gate sequence is independent of the scalar.
-    ///
-    /// See [`CurvePoint::mul_secret_scalar`] for the convenience form (default on-demand tables).
     fn mul_secret_scalar<B: Backend>(
         &self,
         scalar: WordRef<B, W, N>,
@@ -134,18 +120,52 @@ pub trait Curve<W: Word, const N: usize>: Clone + Copy + PartialEq + Eq + Debug 
     ) -> CurvePointRef<B, W, N, Self> {
         let width = W::WIDTH * N;
         let w = tables.window_bits();
+        let num_windows = width.div_ceil(w);
+        // Parity fix: work with an odd representative t ≡ d (mod n). Adding the group order n (odd)
+        // to an even scalar makes it odd without changing d·base (n·base = O); an odd scalar is left
+        // as is. So t is odd and t < 2^width + n < 2^(width+1): its (width+1)-th bit is `carry`,
+        // handled once below.
+        let d_even = !scalar.clone().lsb();
+        let addend = d_even.select_const_const(self.n(), CompositeWord::<W, N>::ZERO);
+        let (mut t, carry) = scalar.overflowing_add(addend);
         let mut res: Option<CurvePointRef<B, W, N, Self>> = None;
-        for k in 0..width.div_ceil(w) {
-            let bits_in_window = core::cmp::min(w, width - k * w);
-            // Oblivious select of T_k[w_k] by the secret window bits, then accumulate.
-            let window_bits: Vec<BooleanWordRef<B>> = (0..bits_in_window)
-                .map(|i| scalar.clone().bit_at(k * w + i))
-                .collect();
-            let selected = select_const_point(&window_bits, tables.window(k), *self);
+        for k in 0..num_windows {
+            let is_top = k + 1 == num_windows;
+            let (sign_neg, index_bits): (BooleanWordRef<B>, Vec<BooleanWordRef<B>>) = if is_top {
+                // Top window: the regular recoding's final digit is the remaining value t itself,
+                // which is odd, positive, and small (< 2^w). Its sign is +, its magnitude is t, so
+                // idx = (t − 1) / 2 = bits 1.. of t, with no sign masking.
+                let sign_neg = t.clone().into_const_bool(false);
+                let bits = (0..w - 1).map(|j| t.clone().bit_at(1 + j)).collect();
+                (sign_neg, bits)
+            } else {
+                // Regular (Joye–Tunstall) recoding: the signed digit is e_k = (t mod 2^(w+1)) − 2^w,
+                // odd and in [−(2^w−1), 2^w−1]. Its sign is the (w)-th bit's complement; its
+                // magnitude 2·idx+1 gives idx = (bits 1.. of t) XOR-masked by the sign.
+                let sign_neg = !t.clone().bit_at(w);
+                let bits = (0..w - 1)
+                    .map(|j| t.clone().bit_at(1 + j) ^ sign_neg.clone())
+                    .collect();
+                (sign_neg, bits)
+            };
+            let selected = select_signed_point(&index_bits, sign_neg, tables.window(k), *self);
             res = Some(match res {
                 None => selected,
+                // Mixed add for every window but the last; complete add for the last window, the
+                // only one where the accumulated partial sum can equal or oppose the table point.
+                Some(r) if !is_top => r.madd(selected),
                 Some(r) => r + selected,
             });
+            // Advance the recoding for the next (non-top) window: t ← (t − e_k) >> w =
+            // ((t >> (w+1)) << 1) | 1. On the first step only, fold the (width+1)-th bit (`carry`)
+            // into its new position, bit (width − w); thereafter the true t fits the word.
+            if !is_top {
+                let mut t_next = ((t >> (w + 1)) << 1).bitor_const(CompositeWord::<W, N>::ONE);
+                if k == 0 {
+                    t_next = t_next ^ (WordRef::from_bool(carry.clone()) << (width - w));
+                }
+                t = t_next;
+            }
         }
         // `width >= 1`, so there is at least one window and `res` is always set.
         return res.expect("at least one window");
@@ -379,56 +399,35 @@ pub(crate) fn select_const_coord<B: Backend, W: Word, const N: usize, M: FieldRe
     return layer.into_iter().next().expect("non-empty mux");
 }
 
-/// Oblivious select of one constant curve point (its three coordinates) out of a window table.
-fn select_const_point<B: Backend, W: Word, const N: usize, C: Curve<W, N>>(
-    bits: &[BooleanWordRef<B>],
+/// Oblivious select of one signed multiple of the base from a window's affine odd-multiple table.
+fn select_signed_point<B: Backend, W: Word, const N: usize, C: Curve<W, N>>(
+    index_bits: &[BooleanWordRef<B>],
+    sign_neg: BooleanWordRef<B>,
     table: &[[MontgomeryWord<W, N, C::P>; 3]],
     curve: C,
 ) -> CurvePointRef<B, W, N, C> {
     let xs: Vec<MontgomeryWord<W, N, C::P>> = table.iter().map(|c| c[0]).collect();
     let ys: Vec<MontgomeryWord<W, N, C::P>> = table.iter().map(|c| c[1]).collect();
-    let zs: Vec<MontgomeryWord<W, N, C::P>> = table.iter().map(|c| c[2]).collect();
-    return CurvePointRef::_jacobian(
-        select_const_coord(bits, &xs),
-        select_const_coord(bits, &ys),
-        select_const_coord(bits, &zs),
-        curve,
-    );
+    let x = select_const_coord(index_bits, &xs);
+    let y = select_const_coord(index_bits, &ys);
+    let y = sign_neg.montgomery_select(-y.clone(), y);
+    return CurvePointRef::_affine(x, y, curve);
 }
 
 /// Default comb window width for [`CurvePoint::mul_secret_scalar`] — a strong reduction in
-/// nonlinear gates with a small per-window table (`2^w` points, ~3 KiB at `w = 5`), suitable for a
-/// memory- and flash-constrained on-device prover: at this width the full base-point table fits the
-/// device's app flash. Host proving with ample memory can use a wider window (fewer gates, smaller
-/// proof) via [`Curve::mul_secret_scalar`] with a custom [`WindowTables`].
+/// nonlinear gates with a small per-window table (`2^(w−1)` affine points, ~2 KiB at `w = 5`),
+/// suitable for a memory- and flash-constrained on-device prover: at this width the base-point
+/// table fits the device's app flash.
 pub const DEFAULT_COMB_WINDOW_BITS: usize = 5;
 
 /// Supplies the per-window point tables for fixed-base comb scalar multiplication
 /// ([`Curve::mul_secret_scalar`] / [`CurvePoint::mul_secret_scalar`]).
-///
-/// For a base point `P`, window width `w = window_bits()`, and window index `k`, the table for
-/// window `k` holds the multiples
-///
-/// ```text
-///   table[j] = j · 2^{w·k} · P ,   j = 0 .. 2^{bits_in_window(k)}
-/// ```
-///
-/// (the final window may be narrower than `w`). These multiples depend only on the public base
-/// point and the windowing — never on the scalar, the witness, or the proof — so a source may
-/// compute them on demand, load them from flash, or hold them in RAM. The on-demand path is also
-/// the natural home for any platform concern (e.g. servicing a secure-element watchdog while the
-/// native arithmetic runs), keeping it out of the circuit math entirely.
 pub trait WindowTables<W: Word, const N: usize, C: Curve<W, N>> {
     /// The window width `w` in bits; the scalar is consumed `w` bits at a time.
     fn window_bits(&self) -> usize;
 
-    /// The table for window `k`: entry `j` is `j · 2^{window_bits·k} · base`.
-    ///
-    /// Borrowed from the source, so a compute-on-demand implementation may hand back a single
-    /// reused buffer (bounding peak memory to one window's `2^w` points). Sources that generate
-    /// sequentially by incremental doubling require `k` in ascending order `0, 1, 2, …`, with a
-    /// request for window `0` restarting the sequence (so one source serves several scalar
-    /// multiplications by the same base in turn); random-access sources (flash, RAM) accept any `k`.
+    /// The table for window `k`: entry `idx` is the affine point `(2·idx+1) · 2^{window_bits·k} ·
+    /// base`.
     fn window(&mut self, k: usize) -> &[[MontgomeryWord<W, N, C::P>; 3]];
 }
 
@@ -453,7 +452,7 @@ impl<W: Word, const N: usize, C: Curve<W, N>> ComputedWindowTables<W, N, C> {
             base_k: base,
             next_k: 0,
             window_bits,
-            buf: Vec::with_capacity(1usize << window_bits),
+            buf: Vec::with_capacity(1usize << window_bits.saturating_sub(1)),
         };
     }
 }
@@ -480,16 +479,22 @@ impl<W: Word, const N: usize, C: Curve<W, N>> WindowTables<W, N, C>
             k * self.window_bits < width,
             "window index past the last window of the scalar"
         );
-        let bits_in_window = core::cmp::min(self.window_bits, width - k * self.window_bits);
+        let half = 1usize << (self.window_bits - 1);
 
-        // Rebuild T_k[j] = j · base_k incrementally into the reused buffer.
+        // Rebuild the odd multiples T_k[j] = (2j+1) · base_k, j = 0 .. 2^(w−1), into the reused
+        // buffer, then normalise them to affine (z = 1) for mixed addition. Every multiple is a
+        // nonzero, non-infinity point (its coefficient is below the group order times a small odd
+        // factor and never a multiple of it), so the batched inversion never divides by zero.
         self.buf.clear();
-        let mut acc = self.curve.zero();
-        self.buf.push(acc.coords());
-        for _ in 1..(1usize << bits_in_window) {
-            acc = acc + self.base_k;
+        let two_base_k = self.base_k.double();
+        let mut acc = self.base_k;
+        for j in 0..half {
+            if j > 0 {
+                acc = acc + two_base_k;
+            }
             self.buf.push(acc.coords());
         }
+        normalize_affine::<W, N, C>(&mut self.buf, self.curve);
 
         // Advance base_k to 2^{window_bits·(k+1)} · base for the next window.
         for _ in 0..self.window_bits {
@@ -497,6 +502,52 @@ impl<W: Word, const N: usize, C: Curve<W, N>> WindowTables<W, N, C>
         }
         self.next_k = k + 1;
         return &self.buf;
+    }
+}
+
+/// Host field inversion generic over the field representation, via Fermat's little theorem
+/// (`x⁻¹ = x^(p−2)` for prime `p`). Both secp256k1 field backends provide fast host multiplication,
+/// but only the Montgomery one has a native `inv`; Fermat works for either (in particular the
+/// pseudo-Mersenne production field). `x` must be nonzero — the caller guarantees it.
+fn field_inv<W: Word, const N: usize, M: FieldRep<W, N>>(
+    field: M,
+    x: MontgomeryWord<W, N, M>,
+) -> MontgomeryWord<W, N, M> {
+    let exp = field
+        .modulus()
+        .wrapping_sub(CompositeWord::<W, N>::ONE << 1); // p − 2
+    let mut result = field.one_word();
+    for i in (0..CompositeWord::<W, N>::WIDTH).rev() {
+        result = result * result;
+        if exp.bit_at(i) {
+            result = result * x;
+        }
+    }
+    return result;
+}
+
+/// Batched normalisation of Jacobian points to affine (`z = 1`), in place.
+fn normalize_affine<W: Word, const N: usize, C: Curve<W, N>>(
+    buf: &mut [[MontgomeryWord<W, N, C::P>; 3]],
+    curve: C,
+) {
+    let field = curve.p();
+    let one = field.one_word();
+    let mut prefix = Vec::with_capacity(buf.len());
+    let mut running = one;
+    for entry in buf.iter() {
+        prefix.push(running);
+        running = running * entry[2];
+    }
+    let mut running_inv = field_inv(field, running);
+    for i in (0..buf.len()).rev() {
+        let z_inv = running_inv * prefix[i];
+        running_inv = running_inv * buf[i][2];
+        let z_inv_sq = z_inv * z_inv;
+        let z_inv_cub = z_inv_sq * z_inv;
+        buf[i][0] = buf[i][0] * z_inv_sq;
+        buf[i][1] = buf[i][1] * z_inv_cub;
+        buf[i][2] = one;
     }
 }
 
@@ -739,6 +790,29 @@ impl<B: Backend, W: Word, const N: usize, C: Curve<W, N>> CurvePointRef<B, W, N,
         let yz = y * z;
         let res_z = yz.clone() + yz;
         return Self::_inf_or_jacobian(is_inf, res_x, res_y, res_z, curve);
+    }
+
+    /// Mixed addition of an affine point into this Jacobian point — **generic case only**.
+    fn madd(self, rhs: Self) -> Self {
+        let (x1, y1, z1, curve) = self.destructure();
+        let (x2, y2, _z2, _) = rhs.destructure();
+        let z1z1 = z1.clone() * z1.clone();
+        let u2 = x2 * z1z1.clone();
+        let s2 = y2 * z1.clone() * z1z1.clone();
+        let h = u2 - x1.clone();
+        let hh = h.clone() * h.clone();
+        let hh2 = hh.clone() + hh.clone();
+        let i = hh2.clone() + hh2;
+        let j = h.clone() * i.clone();
+        let s2_y1 = s2 - y1.clone();
+        let r = s2_y1.clone() + s2_y1;
+        let v = x1 * i;
+        let res_x = r.clone() * r.clone() - j.clone() - v.clone() - v.clone();
+        let y1j = y1 * j;
+        let res_y = r * (v - res_x.clone()) - y1j.clone() - y1j;
+        let z1h = z1.clone() + h.clone();
+        let res_z = z1h.clone() * z1h - z1z1 - hh;
+        return Self::_jacobian(res_x, res_y, res_z, curve);
     }
 
     /// Check if two points are equal, without affine conversion.
