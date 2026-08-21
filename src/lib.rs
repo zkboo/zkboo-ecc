@@ -10,7 +10,7 @@
 //! - [edwards] — the Ed25519 twisted Edwards curve over `GF(2²⁵⁵ − 19)`, in extended coordinates
 //!   with the complete `a = −1` addition formulas and RFC 8032 point compression.
 //!
-//! 🚧 Warning: This crate is work in progress and has not been audited. 🚧
+//! ⚠️ Warning: This crate has not undergone an external security review. ⚠️
 
 #![no_std]
 extern crate alloc;
