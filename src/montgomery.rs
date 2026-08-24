@@ -120,7 +120,21 @@ pub trait Curve<W: Word, const N: usize>: Clone + Copy + PartialEq + Eq + Debug 
     ) -> CurvePointRef<B, W, N, Self> {
         let width = W::WIDTH * N;
         let w = tables.window_bits();
-        let num_windows = width.div_ceil(w);
+        // A one-bit window leaves the magnitude mux with no index bits and a single-entry table,
+        // which `select_const_coord` cannot express (it has no backend handle to allocate the lone
+        // constant from). Reject it here rather than panicking deeper in the mux.
+        assert!(w >= 2, "window width must be at least 2 bits, got {w}");
+        // One window more than the scalar strictly needs, so that `w · num_windows > width` always.
+        // The top window carries whatever the recoding has left, and the recoding only guarantees
+        // that residual to be below `2^w` when at least one bit of headroom is available: from
+        // `t_{k+1} = (t_k − e_k) / 2^w` and `t_0 < 2^(width+1)` we get `t_k ≤ 1 + (t_0 − 1)/2^(w·k)`,
+        // so the residual at window `num_windows − 1` is below `2^w` exactly when
+        // `w · (num_windows − 1) ≥ width`. With `width.div_ceil(w)` that fails whenever `w` divides
+        // `width` (`w ∈ {2, 4, 8, 16}` for a 256-bit scalar): the residual can reach `2^(w+1) − 1`
+        // and its top bit is dropped by the `w − 1`-bit index extraction below, silently returning
+        // the wrong point. With the extra window `w · (num_windows − 1) ≥ width` always holds, and
+        // when `w` divides `width` the top residual is exactly 1 (top digit `+1`, index bits zero).
+        let num_windows = width / w + 1;
         // Parity fix: work with an odd representative t ≡ d (mod n). Adding the group order n (odd)
         // to an even scalar makes it odd without changing d·base (n·base = O); an odd scalar is left
         // as is. So t is odd and t < 2^width + n < 2^(width+1): its (width+1)-th bit is `carry`,
@@ -347,17 +361,22 @@ impl<W: Word, const N: usize, C: Curve<W, N>> CurvePoint<W, N, C> {
     /// arithmetic runs — build a [`WindowTables`] yourself and call
     /// [`Curve::mul_secret_scalar`] directly.
     ///
-    /// For secp256k1 this is roughly an order of magnitude cheaper than [`CurvePointRef::mul`]
-    /// by a secret scalar. The window width trades nonlinear gates against the per-window
-    /// table size (`2^w` points); measured for a full secp256k1 `d·G` (vs. 39.3M nonlinear
-    /// and_msgs for the ladder):
+    /// For secp256k1 this is an order of magnitude cheaper than [`CurvePointRef::mul`] by a secret
+    /// scalar. The window width trades nonlinear gates against the per-window table size
+    /// (`2^(w−1)` odd multiples); measured for a full secp256k1 `d·G` with affine output over the
+    /// pseudo-Mersenne field (vs. 18,028,168 nonlinear and_msgs for the ladder):
     ///
     /// | w | nl and_msgs | speedup | peak table |
     /// |---|------------:|--------:|-----------:|
-    /// | 4 |   7,528,311 |   5.2×  |  16 points |
-    /// | 6 |   5,088,909 |   7.7×  |  64 points |
-    /// | 8 |   3,866,423 |  10.2×  | 256 points |
-    /// |10 |   3,373,355 |  11.6×  |1024 points |
+    /// | 4 |   1,770,659 |  10.2×  |   8 points |
+    /// | 5 |   1,438,977 |  12.5×  |  16 points |
+    /// | 6 |   1,210,663 |  14.9×  |  32 points |
+    /// | 8 |     965,955 |  18.7×  | 128 points |
+    /// |10 |     823,037 |  21.9×  | 512 points |
+    /// |11 |     816,873 |  22.1×  |1024 points |
+    ///
+    /// The gain flattens past `w ≈ 11`, where the mux over `2^(w−1)` table entries starts to cost
+    /// more than the point addition it saves.
     pub fn mul_secret_scalar<B: Backend>(
         self,
         scalar: WordRef<B, W, N>,
@@ -475,8 +494,10 @@ impl<W: Word, const N: usize, C: Curve<W, N>> WindowTables<W, N, C>
             k, self.next_k,
             "windows must be requested in ascending order (or restarting from 0)"
         );
+        // `Curve::mul_secret_scalar` uses `width / w + 1` windows (see the note there), so the last
+        // valid index is `width / w`, which satisfies `k · w ≤ width` rather than `k · w < width`.
         assert!(
-            k * self.window_bits < width,
+            k * self.window_bits <= width,
             "window index past the last window of the scalar"
         );
         let half = 1usize << (self.window_bits - 1);
