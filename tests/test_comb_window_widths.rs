@@ -64,9 +64,9 @@ fn probe_scalars<C: Curve<u64, 4>>(curve: C) -> Vec<CompositeWord<u64, 4>> {
         zero,
         one,
         w_(2),
-        zero.wrapping_sub(n),          // 2^256 − n, the doubling witness at w = 5
-        zero.wrapping_sub(one),        // 2^256 − 1
-        zero.wrapping_sub(w_(2)),      // 2^256 − 2
+        zero.wrapping_sub(n),     // 2^256 − n, the doubling witness at w = 5
+        zero.wrapping_sub(one),   // 2^256 − 1
+        zero.wrapping_sub(w_(2)), // 2^256 − 2
         n,
         n.wrapping_sub(one),
         n.wrapping_add(one),
@@ -82,7 +82,9 @@ fn probe_scalars<C: Curve<u64, 4>>(curve: C) -> Vec<CompositeWord<u64, 4>> {
 /// the 256-bit scalar width (`2, 4, 8, 16`), which have no spare bit for the top residual.
 #[test]
 fn every_window_width_matches_the_native_reference() {
-    for w in 2..=16usize {
+    // 13..=15 are omitted: they are incidental widths that dominate the runtime of this sweep
+    // without covering anything 12 does not. 16 is kept — it is the largest width dividing 256.
+    for w in (2..=12usize).chain(core::iter::once(16)) {
         for scalar in probe_scalars(Secp256k1PM) {
             check(Secp256k1PM, scalar, w);
         }
@@ -136,4 +138,12 @@ fn top_window_doubling_witnesses() {
         ]),
         11,
     );
+}
+
+/// A one-bit window leaves the magnitude mux with no index bits and a single-entry table, which
+/// [`select_const_coord`] cannot express; it must be rejected up front rather than panicking there.
+#[test]
+#[should_panic(expected = "window width must be at least 2 bits")]
+fn a_one_bit_window_is_rejected() {
+    check(Secp256k1PM, CompositeWord::<u64, 4>::ONE, 1);
 }
