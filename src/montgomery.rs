@@ -625,26 +625,6 @@ impl<W: Word, const N: usize, C: Curve<W, N>> WindowTables<W, N, C>
     }
 }
 
-/// Host field inversion generic over the field representation, via Fermat's little theorem
-/// (`x⁻¹ = x^(p−2)` for prime `p`). Both secp256k1 field backends provide fast host multiplication,
-/// but only the Montgomery one has a native `inv`; Fermat works for either (in particular the
-/// pseudo-Mersenne production field). `x` must be nonzero — the caller guarantees it.
-fn field_inv<W: Word, const N: usize, M: FieldRep<W, N>>(
-    field: M,
-    x: MontgomeryWord<W, N, M>,
-) -> MontgomeryWord<W, N, M> {
-    let exp = field
-        .modulus()
-        .wrapping_sub(CompositeWord::<W, N>::ONE << 1); // p − 2
-    let mut result = field.one_word();
-    for i in (0..CompositeWord::<W, N>::WIDTH).rev() {
-        result = result * result;
-        if exp.bit_at(i) {
-            result = result * x;
-        }
-    }
-    return result;
-}
 
 /// Batched normalisation of Jacobian points to affine (`z = 1`), in place.
 fn normalize_affine<W: Word, const N: usize, C: Curve<W, N>>(
@@ -659,7 +639,8 @@ fn normalize_affine<W: Word, const N: usize, C: Curve<W, N>>(
         prefix.push(running);
         running = running * entry[2];
     }
-    let mut running_inv = field_inv(field, running);
+    let mut running_inv =
+        MontgomeryWord::from_inner(field.invert_const(running.into_inner()), field);
     for i in (0..buf.len()).rev() {
         let z_inv = running_inv * prefix[i];
         running_inv = running_inv * buf[i][2];
