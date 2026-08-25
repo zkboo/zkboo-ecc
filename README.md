@@ -9,6 +9,8 @@ Elliptic curve cryptography primitives for the [ZKBoo](https://crates.io/crates/
 Two curves are provided, each with data-oblivious fixed-base comb scalar multiplication (public per-window tables of precomputed multiples, selected by the secret scalar bits — no in-circuit doublings):
 
 - **secp256k1** (`montgomery`, `secp256k1`) — the Bitcoin/Ethereum short-Weierstrass curve in Jacobian coordinates, over generic Montgomery arithmetic with a faster pseudo-Mersenne field variant.
+The per-window tables are public and scalar-independent, so their source is pluggable (`WindowTables`): compute them on demand with a single window's worth of memory (`ComputedWindowTables`, the default, and the natural place for a constrained prover to service a watchdog), or hold the whole table in RAM (`PrecomputedWindowTables`, for hosts, which also affords a wider window).
+
 - **Ed25519** (`edwards`) — the twisted Edwards curve over GF(2²⁵⁵ − 19) in extended coordinates, with the complete `a = −1` addition formulas (no exceptional cases) and RFC 8032 point compression.
 
 ## ⚠️ Unaudited ⚠️
