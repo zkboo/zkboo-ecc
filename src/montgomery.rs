@@ -124,17 +124,7 @@ pub trait Curve<W: Word, const N: usize>: Clone + Copy + PartialEq + Eq + Debug 
         // which `select_const_coord` cannot express (it has no backend handle to allocate the lone
         // constant from). Reject it here rather than panicking deeper in the mux.
         assert!(w >= 2, "window width must be at least 2 bits, got {w}");
-        // One window more than the scalar strictly needs, so that `w · num_windows > width` always.
-        // The top window carries whatever the recoding has left, and the recoding only guarantees
-        // that residual to be below `2^w` when at least one bit of headroom is available: from
-        // `t_{k+1} = (t_k − e_k) / 2^w` and `t_0 < 2^(width+1)` we get `t_k ≤ 1 + (t_0 − 1)/2^(w·k)`,
-        // so the residual at window `num_windows − 1` is below `2^w` exactly when
-        // `w · (num_windows − 1) ≥ width`. With `width.div_ceil(w)` that fails whenever `w` divides
-        // `width` (`w ∈ {2, 4, 8, 16}` for a 256-bit scalar): the residual can reach `2^(w+1) − 1`
-        // and its top bit is dropped by the `w − 1`-bit index extraction below, silently returning
-        // the wrong point. With the extra window `w · (num_windows − 1) ≥ width` always holds, and
-        // when `w` divides `width` the top residual is exactly 1 (top digit `+1`, index bits zero).
-        let num_windows = width / w + 1;
+        let num_windows = comb_window_count(width, w);
         // Parity fix: work with an odd representative t ≡ d (mod n). Adding the group order n (odd)
         // to an even scalar makes it odd without changing d·base (n·base = O); an odd scalar is left
         // as is. So t is odd and t < 2^width + n < 2^(width+1): its (width+1)-th bit is `carry`,
@@ -361,6 +351,10 @@ impl<W: Word, const N: usize, C: Curve<W, N>> CurvePoint<W, N, C> {
     /// arithmetic runs — build a [`WindowTables`] yourself and call
     /// [`Curve::mul_secret_scalar`] directly.
     ///
+    /// A host prover should do exactly that, with a [`PrecomputedWindowTables`] at
+    /// [`HOST_COMB_WINDOW_BITS`]: this form rebuilds every window's table on every circuit pass,
+    /// and the wider window is a further 1.7× off the gate count.
+    ///
     /// For secp256k1 this is an order of magnitude cheaper than [`CurvePointRef::mul`] by a secret
     /// scalar. The window width trades nonlinear gates against the per-window table size
     /// (`2^(w−1)` odd multiples); measured for a full secp256k1 `d·G` with affine output over the
@@ -376,7 +370,8 @@ impl<W: Word, const N: usize, C: Curve<W, N>> CurvePoint<W, N, C> {
     /// |11 |     816,873 |  22.1×  |1024 points |
     ///
     /// The gain flattens past `w ≈ 11`, where the mux over `2^(w−1)` table entries starts to cost
-    /// more than the point addition it saves.
+    /// more than the point addition it saves. What bounds the width in practice is the table, which
+    /// holds `2^(w−1)` points per window: 52 KiB at `w = 5` against 1,536 KiB at `w = 11`.
     pub fn mul_secret_scalar<B: Backend>(
         self,
         scalar: WordRef<B, W, N>,
@@ -439,6 +434,20 @@ fn select_signed_point<B: Backend, W: Word, const N: usize, C: Curve<W, N>>(
 /// table fits the device's app flash.
 pub const DEFAULT_COMB_WINDOW_BITS: usize = 5;
 
+/// Comb window width for a host prover with memory to spare, the optimum for a 256-bit scalar.
+///
+/// Widths above this buy little — the mux over `2^(w−1)` table entries starts to cost more than the
+/// point addition it saves — while the table grows as `2^(w−1)` per window. Pair it with
+/// [`PrecomputedWindowTables`], whose table is 464 KiB at this width against 52 KiB at
+/// [`DEFAULT_COMB_WINDOW_BITS`].
+pub const HOST_COMB_WINDOW_BITS: usize = 9;
+
+/// The number of windows the signed-digit comb ([`Curve::mul_secret_scalar`]) consumes a
+/// `width`-bit scalar in, at window width `window_bits`.
+pub const fn comb_window_count(width: usize, window_bits: usize) -> usize {
+    return width / window_bits + 1;
+}
+
 /// Supplies the per-window point tables for fixed-base comb scalar multiplication
 /// ([`Curve::mul_secret_scalar`] / [`CurvePoint::mul_secret_scalar`]).
 pub trait WindowTables<W: Word, const N: usize, C: Curve<W, N>> {
@@ -494,10 +503,8 @@ impl<W: Word, const N: usize, C: Curve<W, N>> WindowTables<W, N, C>
             k, self.next_k,
             "windows must be requested in ascending order (or restarting from 0)"
         );
-        // `Curve::mul_secret_scalar` uses `width / w + 1` windows (see the note there), so the last
-        // valid index is `width / w`, which satisfies `k · w ≤ width` rather than `k · w < width`.
         assert!(
-            k * self.window_bits <= width,
+            k < comb_window_count(width, self.window_bits),
             "window index past the last window of the scalar"
         );
         let half = 1usize << (self.window_bits - 1);
@@ -523,6 +530,98 @@ impl<W: Word, const N: usize, C: Curve<W, N>> WindowTables<W, N, C>
         }
         self.next_k = k + 1;
         return &self.buf;
+    }
+}
+
+/// A RAM-resident [`WindowTables`]: every window's table built once, up front, and held for the
+/// lifetime of the source. Random access — windows may be requested in any order, any number of
+/// times, and by several scalar multiplications concurrently.
+///
+/// This is the host counterpart of [`ComputedWindowTables`], which rebuilds a window's `2^(w−1)`
+/// multiples by native point arithmetic on *every* request. That rebuild is not incidental: a
+/// circuit pass requests every window once, and a proof runs two passes per repetition, so the
+/// tables are rebuilt `2 · repetitions` times over. Precomputing collapses that to a single build,
+/// and normalises the whole table to affine with **one** field inversion instead of one per window.
+///
+/// The cost is memory. The table holds `2^(w−1)` points per window and
+/// [`comb_window_count`] windows — for a 256-bit scalar, 52 KiB at `w = 5`, 464 KiB at
+/// `w = 9` ([`HOST_COMB_WINDOW_BITS`]), and 1,536 KiB at `w = 11` — so this source is for hosts;
+/// constrained provers should keep the on-demand [`ComputedWindowTables`].
+#[derive(Debug, Clone)]
+pub struct PrecomputedWindowTables<W: Word, const N: usize, C: Curve<W, N>> {
+    window_bits: usize,
+    num_windows: usize,
+    /// All windows concatenated: window `k` occupies `[k · 2^(w−1) .. (k+1) · 2^(w−1))`.
+    points: Vec<[MontgomeryWord<W, N, C::P>; 3]>,
+}
+
+impl<W: Word, const N: usize, C: Curve<W, N>> PrecomputedWindowTables<W, N, C> {
+    /// Builds the full comb table for `base` at the given window width.
+    pub fn new(base: CurvePoint<W, N, C>, window_bits: usize) -> Self {
+        assert!(
+            window_bits >= 2,
+            "window width must be at least 2 bits, got {window_bits}"
+        );
+        let curve = base.curve();
+        let num_windows = comb_window_count(W::WIDTH * N, window_bits);
+        let half = 1usize << (window_bits - 1);
+        let mut points = Vec::with_capacity(num_windows * half);
+        let mut base_k = base;
+        for _ in 0..num_windows {
+            // Odd multiples T_k[j] = (2j+1) · base_k, j = 0 .. 2^(w−1). Every one is a nonzero,
+            // non-infinity point (its coefficient is below the group order times a small odd factor
+            // and never a multiple of it), so the batched inversion never divides by zero.
+            let two_base_k = base_k.double();
+            let mut acc = base_k;
+            for j in 0..half {
+                if j > 0 {
+                    acc = acc + two_base_k;
+                }
+                points.push(acc.coords());
+            }
+            for _ in 0..window_bits {
+                base_k = base_k.double();
+            }
+        }
+        normalize_affine::<W, N, C>(&mut points, curve);
+        return Self {
+            window_bits,
+            num_windows,
+            points,
+        };
+    }
+
+    /// The number of windows held, [`comb_window_count`] for the scalar width and window width.
+    pub fn num_windows(&self) -> usize {
+        return self.num_windows;
+    }
+
+    /// The total number of affine points held, across all windows.
+    pub fn len(&self) -> usize {
+        return self.points.len();
+    }
+
+    /// Whether the table is empty (it never is: there is always at least one window).
+    pub fn is_empty(&self) -> bool {
+        return self.points.is_empty();
+    }
+}
+
+impl<W: Word, const N: usize, C: Curve<W, N>> WindowTables<W, N, C>
+    for PrecomputedWindowTables<W, N, C>
+{
+    #[inline]
+    fn window_bits(&self) -> usize {
+        return self.window_bits;
+    }
+
+    fn window(&mut self, k: usize) -> &[[MontgomeryWord<W, N, C::P>; 3]] {
+        assert!(
+            k < self.num_windows,
+            "window index past the last window of the scalar"
+        );
+        let half = 1usize << (self.window_bits - 1);
+        return &self.points[k * half..(k + 1) * half];
     }
 }
 
