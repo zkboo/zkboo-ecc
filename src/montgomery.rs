@@ -340,38 +340,9 @@ impl<W: Word, const N: usize, C: Curve<W, N>> CurvePoint<W, N, C> {
         return !self.eq(rhs);
     }
 
-    /// Fixed-base scalar multiplication of this base point by a **secret** (circuit-value)
-    /// scalar, data-oblivious, computing the window tables on demand at the default window
-    /// width ([`DEFAULT_COMB_WINDOW_BITS`]).
-    ///
-    /// This is the convenience form of [`Curve::mul_secret_scalar`]: it builds a
-    /// [`ComputedWindowTables`] for this base point and multiplies. For control over the
-    /// window width, or to supply a different table source — flash-resident tables, or
-    /// on-demand computation that services a platform watchdog while the native table
-    /// arithmetic runs — build a [`WindowTables`] yourself and call
-    /// [`Curve::mul_secret_scalar`] directly.
-    ///
-    /// A host prover should do exactly that, with a [`PrecomputedWindowTables`] at
-    /// [`HOST_COMB_WINDOW_BITS`]: this form rebuilds every window's table on every circuit pass,
-    /// and the wider window is a further 1.7× off the gate count.
-    ///
-    /// For secp256k1 this is an order of magnitude cheaper than [`CurvePointRef::mul`] by a secret
-    /// scalar. The window width trades nonlinear gates against the per-window table size
-    /// (`2^(w−1)` odd multiples); measured for a full secp256k1 `d·G` with affine output over the
-    /// pseudo-Mersenne field (vs. 18,028,168 nonlinear and_msgs for the ladder):
-    ///
-    /// | w | nl and_msgs | speedup | peak table |
-    /// |---|------------:|--------:|-----------:|
-    /// | 4 |   1,770,659 |  10.2×  |   8 points |
-    /// | 5 |   1,438,977 |  12.5×  |  16 points |
-    /// | 6 |   1,210,663 |  14.9×  |  32 points |
-    /// | 8 |     965,955 |  18.7×  | 128 points |
-    /// |10 |     823,037 |  21.9×  | 512 points |
-    /// |11 |     816,873 |  22.1×  |1024 points |
-    ///
-    /// The gain flattens past `w ≈ 11`, where the mux over `2^(w−1)` table entries starts to cost
-    /// more than the point addition it saves. What bounds the width in practice is the table, which
-    /// holds `2^(w−1)` points per window: 52 KiB at `w = 5` against 1,536 KiB at `w = 11`.
+    /// Fixed-base scalar multiplication of this base point by a **secret** (circuit-value) scalar,
+    /// data-oblivious, computing the window tables on demand at the default window width
+    /// ([`DEFAULT_COMB_WINDOW_BITS`]).
     pub fn mul_secret_scalar<B: Backend>(
         self,
         scalar: WordRef<B, W, N>,
@@ -435,11 +406,6 @@ fn select_signed_point<B: Backend, W: Word, const N: usize, C: Curve<W, N>>(
 pub const DEFAULT_COMB_WINDOW_BITS: usize = 5;
 
 /// Comb window width for a host prover with memory to spare, the optimum for a 256-bit scalar.
-///
-/// Widths above this buy little — the mux over `2^(w−1)` table entries starts to cost more than the
-/// point addition it saves — while the table grows as `2^(w−1)` per window. Pair it with
-/// [`PrecomputedWindowTables`], whose table is 464 KiB at this width against 52 KiB at
-/// [`DEFAULT_COMB_WINDOW_BITS`].
 pub const HOST_COMB_WINDOW_BITS: usize = 9;
 
 /// The number of windows the signed-digit comb ([`Curve::mul_secret_scalar`]) consumes a
@@ -534,19 +500,7 @@ impl<W: Word, const N: usize, C: Curve<W, N>> WindowTables<W, N, C>
 }
 
 /// A RAM-resident [`WindowTables`]: every window's table built once, up front, and held for the
-/// lifetime of the source. Random access — windows may be requested in any order, any number of
-/// times, and by several scalar multiplications concurrently.
-///
-/// This is the host counterpart of [`ComputedWindowTables`], which rebuilds a window's `2^(w−1)`
-/// multiples by native point arithmetic on *every* request. That rebuild is not incidental: a
-/// circuit pass requests every window once, and a proof runs two passes per repetition, so the
-/// tables are rebuilt `2 · repetitions` times over. Precomputing collapses that to a single build,
-/// and normalises the whole table to affine with **one** field inversion instead of one per window.
-///
-/// The cost is memory. The table holds `2^(w−1)` points per window and
-/// [`comb_window_count`] windows — for a 256-bit scalar, 52 KiB at `w = 5`, 464 KiB at
-/// `w = 9` ([`HOST_COMB_WINDOW_BITS`]), and 1,536 KiB at `w = 11` — so this source is for hosts;
-/// constrained provers should keep the on-demand [`ComputedWindowTables`].
+/// lifetime of the source.
 #[derive(Debug, Clone)]
 pub struct PrecomputedWindowTables<W: Word, const N: usize, C: Curve<W, N>> {
     window_bits: usize,
