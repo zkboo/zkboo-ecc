@@ -4,11 +4,12 @@
 
 use zkboo::{
     backend::{Backend, Frontend},
-    circuit::Circuit,
+    circuit::{Assertions, Circuit},
     word::CompositeWord,
 };
-use zkboo_ecc::montgomery::{Curve, PrecomputedWindowTables};
+use zkboo_ecc::montgomery::{AffineCombAdvice, Curve, PrecomputedWindowTables, Squaring};
 use zkboo_ecc::secp256k1::Secp256k1PM;
+use zkboo_modular::montgomery::MontgomeryFrontendIO;
 use zkboo_profiling::profile;
 
 struct Comb {
@@ -91,4 +92,77 @@ fn per_width_gate_counts_are_pinned() {
         pins[0].1, COMB_AND_MSG_SIZE,
         "the RAM-resident table source changed the circuit at the default width"
     );
+}
+
+/// The affine comb, which asks for each addition's slope instead of avoiding the division.
+struct AffineCombAtWidth {
+    scalar: CompositeWord<u64, 4>,
+    w: usize,
+    squaring: Squaring,
+}
+
+impl Circuit for AffineCombAtWidth {
+    fn exec<B: Backend>(&self, fe: &Frontend<B>) {
+        let mut asserts = Assertions::new();
+        let mut tables = PrecomputedWindowTables::new(Secp256k1PM.g(), self.w);
+        let advice = AffineCombAdvice::compute(Secp256k1PM, self.scalar, &mut tables);
+        let (x, y) = Secp256k1PM.mul_secret_scalar_affine_with(
+            fe,
+            fe.input(self.scalar),
+            &mut tables,
+            &advice,
+            &mut asserts,
+            self.squaring,
+        );
+        fe.montgomery_output(x);
+        fe.montgomery_output(y);
+        asserts.output(fe);
+    }
+}
+
+#[test]
+fn the_affine_comb_costs_a_third_of_the_jacobian_one() {
+    // Three field multiplications per window against the mixed addition's eleven, and no
+    // conversion out of Jacobian coordinates at the end. The width that minimises the total moves
+    // with the trade — the mux is now a larger share of each window — so it is pinned here too.
+    let pins = [
+        (5usize, 367_523usize),
+        (9, 231_787),
+        (10, 234_195),
+        (11, 265_155),
+    ];
+    for (w, expected) in pins {
+        let counts = profile(&AffineCombAtWidth {
+            scalar: CompositeWord::<u64, 4>::MAX,
+            w,
+            squaring: Squaring::Multiplication,
+        })
+        .and_msg_size()
+        .sum();
+        assert_eq!(
+            counts, expected,
+            "affine comb AND-message count changed at w={w}"
+        );
+    }
+    // Nine bits is the optimum, and the reason `HOST_COMB_WINDOW_BITS` is nine.
+    let best = pins.iter().min_by_key(|(_, nl)| *nl).expect("non-empty");
+    assert_eq!(best.0, 9, "the optimal window width moved");
+}
+
+#[test]
+fn the_dedicated_squarer_takes_a_further_tenth_off_the_affine_comb() {
+    // One squaring per window and two at the last, each some 724 AND messages cheaper than the
+    // multiplication it replaces. The saving is paid for in prover time, which is why it is a
+    // choice rather than the default.
+    let cost = |squaring| {
+        profile(&AffineCombAtWidth {
+            scalar: CompositeWord::<u64, 4>::MAX,
+            w: 9,
+            squaring,
+        })
+        .and_msg_size()
+        .sum()
+    };
+    assert_eq!(cost(Squaring::Multiplication), 231_787);
+    assert_eq!(cost(Squaring::Dedicated), 210_791);
 }
