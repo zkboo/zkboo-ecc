@@ -9,6 +9,7 @@ use core::{
 };
 use zkboo::{
     backend::{Backend, BooleanWordRef, Frontend, WordRef},
+    circuit::Assertions,
     word::{CompositeWord, Word, WordLike},
 };
 use zkboo_modular::field::FieldRep;
@@ -118,40 +119,11 @@ pub trait Curve<W: Word, const N: usize>: Clone + Copy + PartialEq + Eq + Debug 
         scalar: WordRef<B, W, N>,
         tables: &mut impl WindowTables<W, N, Self>,
     ) -> CurvePointRef<B, W, N, Self> {
-        let width = W::WIDTH * N;
-        let w = tables.window_bits();
-        // A one-bit window leaves the magnitude mux with no index bits and a single-entry table,
-        // which `select_const_coord` cannot express (it has no backend handle to allocate the lone
-        // constant from). Reject it here rather than panicking deeper in the mux.
-        assert!(w >= 2, "window width must be at least 2 bits, got {w}");
-        let num_windows = comb_window_count(width, w);
-        // Parity fix: work with an odd representative t ≡ d (mod n). Adding the group order n (odd)
-        // to an even scalar makes it odd without changing d·base (n·base = O); an odd scalar is left
-        // as is. So t is odd and t < 2^width + n < 2^(width+1): its (width+1)-th bit is `carry`,
-        // handled once below.
-        let d_even = !scalar.clone().lsb();
-        let addend = d_even.select_const_const(self.n(), CompositeWord::<W, N>::ZERO);
-        let (mut t, carry) = scalar.overflowing_add(addend);
+        let mut recoding = CombRecoding::new(scalar, self.n(), tables.window_bits());
         let mut res: Option<CurvePointRef<B, W, N, Self>> = None;
-        for k in 0..num_windows {
-            let is_top = k + 1 == num_windows;
-            let (sign_neg, index_bits): (BooleanWordRef<B>, Vec<BooleanWordRef<B>>) = if is_top {
-                // Top window: the regular recoding's final digit is the remaining value t itself,
-                // which is odd, positive, and small (< 2^w). Its sign is +, its magnitude is t, so
-                // idx = (t − 1) / 2 = bits 1.. of t, with no sign masking.
-                let sign_neg = t.clone().into_const_bool(false);
-                let bits = (0..w - 1).map(|j| t.clone().bit_at(1 + j)).collect();
-                (sign_neg, bits)
-            } else {
-                // Regular (Joye–Tunstall) recoding: the signed digit is e_k = (t mod 2^(w+1)) − 2^w,
-                // odd and in [−(2^w−1), 2^w−1]. Its sign is the (w)-th bit's complement; its
-                // magnitude 2·idx+1 gives idx = (bits 1.. of t) XOR-masked by the sign.
-                let sign_neg = !t.clone().bit_at(w);
-                let bits = (0..w - 1)
-                    .map(|j| t.clone().bit_at(1 + j) ^ sign_neg.clone())
-                    .collect();
-                (sign_neg, bits)
-            };
+        for k in 0..recoding.num_windows() {
+            let is_top = k + 1 == recoding.num_windows();
+            let (sign_neg, index_bits) = recoding.next_digit();
             let selected = select_signed_point(&index_bits, sign_neg, tables.window(k), *self);
             res = Some(match res {
                 None => selected,
@@ -160,20 +132,389 @@ pub trait Curve<W: Word, const N: usize>: Clone + Copy + PartialEq + Eq + Debug 
                 Some(r) if !is_top => r.madd(selected),
                 Some(r) => r + selected,
             });
-            // Advance the recoding for the next (non-top) window: t ← (t − e_k) >> w =
-            // ((t >> (w+1)) << 1) | 1. On the first step only, fold the (width+1)-th bit (`carry`)
-            // into its new position, bit (width − w); thereafter the true t fits the word.
-            if !is_top {
-                let mut t_next = ((t >> (w + 1)) << 1).bitor_const(CompositeWord::<W, N>::ONE);
-                if k == 0 {
-                    t_next = t_next ^ (WordRef::from_bool(carry.clone()) << (width - w));
-                }
-                t = t_next;
-            }
         }
         // `width >= 1`, so there is at least one window and `res` is always set.
         return res.expect("at least one window");
     }
+
+    /// Fixed-base scalar multiplication by a **secret** scalar, accumulating in affine coordinates
+    /// and returning the affine result `(x, y)` directly.
+    fn mul_secret_scalar_affine<B: Backend>(
+        &self,
+        frontend: &Frontend<B>,
+        scalar: WordRef<B, W, N>,
+        tables: &mut impl WindowTables<W, N, Self>,
+        advice: &AffineCombAdvice<W, N>,
+        assertions: &mut Assertions<B>,
+    ) -> (
+        MontgomeryWordRef<B, W, N, Self::P>,
+        MontgomeryWordRef<B, W, N, Self::P>,
+    ) {
+        return self.mul_secret_scalar_affine_with(
+            frontend,
+            scalar,
+            tables,
+            advice,
+            assertions,
+            Squaring::default(),
+        );
+    }
+
+    /// [`Curve::mul_secret_scalar_affine`] with an explicit choice of how to square — the one knob
+    /// that trades proof bytes for prover time here.
+    fn mul_secret_scalar_affine_with<B: Backend>(
+        &self,
+        frontend: &Frontend<B>,
+        scalar: WordRef<B, W, N>,
+        tables: &mut impl WindowTables<W, N, Self>,
+        advice: &AffineCombAdvice<W, N>,
+        assertions: &mut Assertions<B>,
+        squaring: Squaring,
+    ) -> (
+        MontgomeryWordRef<B, W, N, Self::P>,
+        MontgomeryWordRef<B, W, N, Self::P>,
+    ) {
+        let field = self.p();
+        let width = W::WIDTH * N;
+        let mut recoding = CombRecoding::new(scalar, self.n(), tables.window_bits());
+        let num_windows = recoding.num_windows();
+        assert!(
+            tables.window_bits() * (num_windows - 1) < width,
+            "the affine comb needs a window width that does not divide the scalar width, got {}",
+            tables.window_bits()
+        );
+        assert_eq!(
+            advice.len(),
+            num_windows,
+            "the affine comb needs one slope per window, plus a tangent at the last"
+        );
+        let mut next_slope = 0usize;
+        let mut acc: Option<(
+            MontgomeryWordRef<B, W, N, Self::P>,
+            MontgomeryWordRef<B, W, N, Self::P>,
+        )> = None;
+        for k in 0..num_windows {
+            let is_top = k + 1 == num_windows;
+            let (sign_neg, index_bits) = recoding.next_digit();
+            let (x2, y2) =
+                select_signed_affine::<B, W, N, Self>(&index_bits, sign_neg, tables.window(k));
+            acc = Some(match acc {
+                None => (x2, y2),
+                Some((x1, y1)) if !is_top => {
+                    let lambda = advice.input(frontend, &mut next_slope, field);
+                    let dx = x2.clone() - x1.clone();
+                    // The two together are exactly the genericity precondition of a chord: the
+                    // slope is what the line through the two points has, and there is a line.
+                    dx.clone().is_nonzero().assert_into(assertions);
+                    (lambda.clone() * dx)
+                        .eq(y2 - y1.clone())
+                        .assert_into(assertions);
+                    affine_add_from_slope(lambda, x1, y1, x2, squaring)
+                }
+                Some((x1, y1)) => {
+                    let chord = advice.input(frontend, &mut next_slope, field);
+                    let tangent = advice.input(frontend, &mut next_slope, field);
+                    let same_x = x1.clone().eq(x2.clone());
+                    // Opposite points sum to infinity, which has no affine coordinates. Assert the
+                    // case away rather than select around it: a select would have to produce
+                    // *something*, and whatever it produced would be a point the prover could
+                    // reach without knowing a discrete logarithm.
+                    (!(same_x.clone() & y1.clone().ne(y2.clone()))).assert_into(assertions);
+                    // Both slopes are constrained whichever arm is taken. In the doubling arm the
+                    // chord constraint reads `λ·0 == 0` and pins nothing, but the select discards
+                    // that slope; in the generic arm the tangent constraint still pins its slope,
+                    // since the accumulator is a point of odd prime order and so has `Y ≠ 0`.
+                    let dx = x2.clone() - x1.clone();
+                    (chord.clone() * dx)
+                        .eq(y2.clone() - y1.clone())
+                        .assert_into(assertions);
+                    let two_y1 = y1.clone() + y1.clone();
+                    let x1_squared = squaring.apply(x1.clone());
+                    let tangent_numerator =
+                        x1_squared.clone() + x1_squared.clone() + x1_squared + self.a();
+                    (tangent.clone() * two_y1)
+                        .eq(tangent_numerator)
+                        .assert_into(assertions);
+                    let lambda = same_x.montgomery_select(tangent, chord);
+                    affine_add_from_slope(lambda, x1, y1, x2, squaring)
+                }
+            });
+        }
+        // `width >= 1`, so there is at least one window and `acc` is always set.
+        return acc.expect("at least one window");
+    }
+}
+
+/// The signed-digit (Joye–Tunstall) recoding of a secret scalar, one window at a time.
+struct CombRecoding<B: Backend, W: Word, const N: usize> {
+    /// The running residual `t`, an odd representative of the scalar modulo the group order.
+    t: WordRef<B, W, N>,
+    /// The `(width+1)`-th bit of the initial residual, folded in at the first step.
+    carry: BooleanWordRef<B>,
+    window_bits: usize,
+    width: usize,
+    num_windows: usize,
+    /// The window the next call to [`CombRecoding::next_digit`] will yield.
+    next_k: usize,
+}
+
+impl<B: Backend, W: Word, const N: usize> CombRecoding<B, W, N> {
+    /// Starts the recoding of `scalar` at the given window width, over a group of order `n`.
+    fn new(scalar: WordRef<B, W, N>, n: CompositeWord<W, N>, window_bits: usize) -> Self {
+        let width = W::WIDTH * N;
+        // A one-bit window leaves the magnitude mux with no index bits and a single-entry table,
+        // which `select_const_coord` cannot express (it has no backend handle to allocate the lone
+        // constant from). Reject it here rather than panicking deeper in the mux.
+        assert!(
+            window_bits >= 2,
+            "window width must be at least 2 bits, got {window_bits}"
+        );
+        // Parity fix: work with an odd representative t ≡ d (mod n). Adding the group order n (odd)
+        // to an even scalar makes it odd without changing d·base (n·base = O); an odd scalar is left
+        // as is. So t is odd and t < 2^width + n < 2^(width+1): its (width+1)-th bit is `carry`,
+        // handled once below.
+        let d_even = !scalar.clone().lsb();
+        let addend = d_even.select_const_const(n, CompositeWord::<W, N>::ZERO);
+        let (t, carry) = scalar.overflowing_add(addend);
+        return Self {
+            t,
+            carry,
+            window_bits,
+            width,
+            num_windows: comb_window_count(width, window_bits),
+            next_k: 0,
+        };
+    }
+
+    /// The number of windows this recoding yields.
+    fn num_windows(&self) -> usize {
+        return self.num_windows;
+    }
+
+    /// The next window's digit, as a sign and the `w−1` index bits of its magnitude `2·idx+1`.
+    fn next_digit(&mut self) -> (BooleanWordRef<B>, Vec<BooleanWordRef<B>>) {
+        let k = self.next_k;
+        assert!(k < self.num_windows, "recoding is exhausted");
+        let w = self.window_bits;
+        let is_top = k + 1 == self.num_windows;
+        let (sign_neg, index_bits): (BooleanWordRef<B>, Vec<BooleanWordRef<B>>) = if is_top {
+            // Top window: the regular recoding's final digit is the remaining value t itself,
+            // which is odd, positive, and small (< 2^w). Its sign is +, its magnitude is t, so
+            // idx = (t − 1) / 2 = bits 1.. of t, with no sign masking.
+            let sign_neg = self.t.clone().into_const_bool(false);
+            let bits = (0..w - 1).map(|j| self.t.clone().bit_at(1 + j)).collect();
+            (sign_neg, bits)
+        } else {
+            // Regular (Joye–Tunstall) recoding: the signed digit is e_k = (t mod 2^(w+1)) − 2^w,
+            // odd and in [−(2^w−1), 2^w−1]. Its sign is the (w)-th bit's complement; its
+            // magnitude 2·idx+1 gives idx = (bits 1.. of t) XOR-masked by the sign.
+            let sign_neg = !self.t.clone().bit_at(w);
+            let bits = (0..w - 1)
+                .map(|j| self.t.clone().bit_at(1 + j) ^ sign_neg.clone())
+                .collect();
+            (sign_neg, bits)
+        };
+        // Advance the recoding for the next (non-top) window: t ← (t − e_k) >> w =
+        // ((t >> (w+1)) << 1) | 1. On the first step only, fold the (width+1)-th bit (`carry`)
+        // into its new position, bit (width − w); thereafter the true t fits the word.
+        if !is_top {
+            let mut t_next =
+                ((self.t.clone() >> (w + 1)) << 1).bitor_const(CompositeWord::<W, N>::ONE);
+            if k == 0 {
+                t_next = t_next ^ (WordRef::from_bool(self.carry.clone()) << (self.width - w));
+            }
+            self.t = t_next;
+        }
+        self.next_k = k + 1;
+        return (sign_neg, index_bits);
+    }
+}
+
+/// The cleartext mirror of [`CombRecoding`], for the host pass that computes the affine comb's
+/// advice.
+struct HostCombRecoding<W: Word, const N: usize> {
+    t: CompositeWord<W, N>,
+    carry: bool,
+    window_bits: usize,
+    width: usize,
+    num_windows: usize,
+    next_k: usize,
+}
+
+impl<W: Word, const N: usize> HostCombRecoding<W, N> {
+    fn new(scalar: CompositeWord<W, N>, n: CompositeWord<W, N>, window_bits: usize) -> Self {
+        let width = W::WIDTH * N;
+        assert!(
+            window_bits >= 2,
+            "window width must be at least 2 bits, got {window_bits}"
+        );
+        let addend = if scalar.lsb() {
+            CompositeWord::<W, N>::ZERO
+        } else {
+            n
+        };
+        let (t, carry) = scalar.overflowing_add(addend);
+        return Self {
+            t,
+            carry,
+            window_bits,
+            width,
+            num_windows: comb_window_count(width, window_bits),
+            next_k: 0,
+        };
+    }
+
+    fn num_windows(&self) -> usize {
+        return self.num_windows;
+    }
+
+    /// The next window's digit, as a sign and the table index of its magnitude `2·idx+1`.
+    fn next_digit(&mut self) -> (bool, usize) {
+        let k = self.next_k;
+        assert!(k < self.num_windows, "recoding is exhausted");
+        let w = self.window_bits;
+        let is_top = k + 1 == self.num_windows;
+        let (sign_neg, index) = if is_top {
+            let bits: usize = (0..w - 1).map(|j| usize::from(self.t.bit_at(1 + j)) << j).sum();
+            (false, bits)
+        } else {
+            let sign_neg = !self.t.bit_at(w);
+            let bits: usize = (0..w - 1)
+                .map(|j| usize::from(self.t.bit_at(1 + j) ^ sign_neg) << j)
+                .sum();
+            (sign_neg, bits)
+        };
+        if !is_top {
+            let mut t_next = ((self.t >> (w + 1)) << 1) | CompositeWord::<W, N>::ONE;
+            if k == 0 && self.carry {
+                t_next = t_next ^ (CompositeWord::<W, N>::ONE << (self.width - w));
+            }
+            self.t = t_next;
+        }
+        self.next_k = k + 1;
+        return (sign_neg, index);
+    }
+}
+
+/// The slopes [`Curve::mul_secret_scalar_affine`] needs, computed on the host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AffineCombAdvice<W: Word, const N: usize> {
+    slopes: Vec<CompositeWord<W, N>>,
+}
+
+impl<W: Word, const N: usize> AffineCombAdvice<W, N> {
+    /// Mirrors the affine comb on the host, collecting the slope it needs at each window.
+    pub fn compute<C: Curve<W, N>>(
+        curve: C,
+        scalar: CompositeWord<W, N>,
+        tables: &mut impl WindowTables<W, N, C>,
+    ) -> Self {
+        let field = curve.p();
+        let width = W::WIDTH * N;
+        let mut recoding = HostCombRecoding::new(scalar, curve.n(), tables.window_bits());
+        let num_windows = recoding.num_windows();
+        assert!(
+            tables.window_bits() * (num_windows - 1) < width,
+            "the affine comb needs a window width that does not divide the scalar width, got {}",
+            tables.window_bits()
+        );
+        let mut slopes: Vec<CompositeWord<W, N>> = Vec::with_capacity(num_windows);
+        let mut acc: Option<(MontgomeryWord<W, N, C::P>, MontgomeryWord<W, N, C::P>)> = None;
+        for k in 0..num_windows {
+            let is_top = k + 1 == num_windows;
+            let (sign_neg, index) = recoding.next_digit();
+            let entry = tables.window(k)[index];
+            let x2 = entry[0];
+            let y2 = if sign_neg { -entry[1] } else { entry[1] };
+            acc = Some(match acc {
+                None => (x2, y2),
+                Some((x1, y1)) if !is_top => {
+                    let lambda = host_chord_slope(x1, y1, x2, y2, field);
+                    slopes.push(lambda.into_inner());
+                    host_affine_add(lambda, x1, y1, x2)
+                }
+                Some((x1, y1)) => {
+                    let chord = host_chord_slope(x1, y1, x2, y2, field);
+                    let tangent = host_tangent_slope(x1, y1, curve.a(), field);
+                    // The circuit asks for the chord first and the tangent second, and consumes
+                    // them in that order; the order here is the interface.
+                    slopes.push(chord.into_inner());
+                    slopes.push(tangent.into_inner());
+                    let lambda = if x1 == x2 { tangent } else { chord };
+                    host_affine_add(lambda, x1, y1, x2)
+                }
+            });
+        }
+        let _ = acc.expect("at least one window");
+        debug_assert_eq!(slopes.len(), num_windows, "advice length is the window count");
+        return Self { slopes };
+    }
+
+    /// The advice's shape without its values, for a verifier: `comb_window_count` zeros.
+    pub fn zeros(width: usize, window_bits: usize) -> Self {
+        return Self {
+            slopes: alloc::vec![CompositeWord::<W, N>::ZERO; comb_window_count(width, window_bits)],
+        };
+    }
+
+    /// How many slopes this holds.
+    pub fn len(&self) -> usize {
+        return self.slopes.len();
+    }
+
+    /// Whether this holds no slopes at all.
+    pub fn is_empty(&self) -> bool {
+        return self.slopes.is_empty();
+    }
+
+    /// The next slope, allocated as an input in the given frontend.
+    pub(crate) fn input<B: Backend, M: FieldRep<W, N>>(
+        &self,
+        frontend: &Frontend<B>,
+        next: &mut usize,
+        field: M,
+    ) -> MontgomeryWordRef<B, W, N, M> {
+        let value = self.slopes[*next];
+        *next += 1;
+        return MontgomeryWordRef::from_inner(frontend.input(value), field);
+    }
+}
+
+/// The chord slope `(Y2 − Y1) / (X2 − X1)`, on the host.
+fn host_chord_slope<W: Word, const N: usize, M: FieldRep<W, N>>(
+    x1: MontgomeryWord<W, N, M>,
+    y1: MontgomeryWord<W, N, M>,
+    x2: MontgomeryWord<W, N, M>,
+    y2: MontgomeryWord<W, N, M>,
+    field: M,
+) -> MontgomeryWord<W, N, M> {
+    let denominator = field.invert_const((x2 - x1).into_inner());
+    return (y2 - y1) * MontgomeryWord::from_inner(denominator, field);
+}
+
+/// The tangent slope `(3·X² + a) / (2·Y)`, on the host.
+fn host_tangent_slope<W: Word, const N: usize, M: FieldRep<W, N>>(
+    x: MontgomeryWord<W, N, M>,
+    y: MontgomeryWord<W, N, M>,
+    a: MontgomeryWord<W, N, M>,
+    field: M,
+) -> MontgomeryWord<W, N, M> {
+    let numerator = x * x + x * x + x * x + a;
+    let denominator = field.invert_const((y + y).into_inner());
+    return numerator * MontgomeryWord::from_inner(denominator, field);
+}
+
+/// `X3 = λ² − X1 − X2`, `Y3 = λ·(X1 − X3) − Y1`, on the host — the mirror of
+/// [`affine_add_from_slope`].
+fn host_affine_add<W: Word, const N: usize, M: FieldRep<W, N>>(
+    lambda: MontgomeryWord<W, N, M>,
+    x1: MontgomeryWord<W, N, M>,
+    y1: MontgomeryWord<W, N, M>,
+    x2: MontgomeryWord<W, N, M>,
+) -> (MontgomeryWord<W, N, M>, MontgomeryWord<W, N, M>) {
+    let x3 = lambda * lambda - x1 - x2;
+    let y3 = lambda * (x1 - x3) - y1;
+    return (x3, y3);
 }
 
 /// A point on an elliptic curve in short Weierstrass form, in Jacobian representation,
@@ -391,12 +732,38 @@ fn select_signed_point<B: Backend, W: Word, const N: usize, C: Curve<W, N>>(
     table: &[[MontgomeryWord<W, N, C::P>; 3]],
     curve: C,
 ) -> CurvePointRef<B, W, N, C> {
+    let (x, y) = select_signed_affine::<B, W, N, C>(index_bits, sign_neg, table);
+    return CurvePointRef::_affine(x, y, curve);
+}
+
+/// The affine coordinates of [`select_signed_point`], without wrapping them into a point.
+fn select_signed_affine<B: Backend, W: Word, const N: usize, C: Curve<W, N>>(
+    index_bits: &[BooleanWordRef<B>],
+    sign_neg: BooleanWordRef<B>,
+    table: &[[MontgomeryWord<W, N, C::P>; 3]],
+) -> (
+    MontgomeryWordRef<B, W, N, C::P>,
+    MontgomeryWordRef<B, W, N, C::P>,
+) {
     let xs: Vec<MontgomeryWord<W, N, C::P>> = table.iter().map(|c| c[0]).collect();
     let ys: Vec<MontgomeryWord<W, N, C::P>> = table.iter().map(|c| c[1]).collect();
     let x = select_const_coord(index_bits, &xs);
     let y = select_const_coord(index_bits, &ys);
     let y = sign_neg.montgomery_select(-y.clone(), y);
-    return CurvePointRef::_affine(x, y, curve);
+    return (x, y);
+}
+
+/// Affine point addition from a slope: `X3 = λ² − X1 − X2`, `Y3 = λ·(X1 − X3) − Y1`.
+fn affine_add_from_slope<B: Backend, W: Word, const N: usize, M: FieldRep<W, N>>(
+    lambda: MontgomeryWordRef<B, W, N, M>,
+    x1: MontgomeryWordRef<B, W, N, M>,
+    y1: MontgomeryWordRef<B, W, N, M>,
+    x2: MontgomeryWordRef<B, W, N, M>,
+    squaring: Squaring,
+) -> (MontgomeryWordRef<B, W, N, M>, MontgomeryWordRef<B, W, N, M>) {
+    let x3 = squaring.apply(lambda.clone()) - x1.clone() - x2;
+    let y3 = lambda * (x1 - x3.clone()) - y1;
+    return (x3, y3);
 }
 
 /// Default comb window width for [`CurvePoint::mul_secret_scalar`] — a strong reduction in
@@ -412,6 +779,31 @@ pub const HOST_COMB_WINDOW_BITS: usize = 9;
 /// `width`-bit scalar in, at window width `window_bits`.
 pub const fn comb_window_count(width: usize, window_bits: usize) -> usize {
     return width / window_bits + 1;
+}
+
+/// How [`Curve::mul_secret_scalar_affine_with`] squares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Squaring {
+    /// Square by multiplying.
+    #[default]
+    Multiplication,
+    /// Square with the dedicated squarer
+    /// ([`WordRef::wide_square`](zkboo::backend::WordRef::wide_square)): about a third fewer AND
+    /// messages per squaring, at more prover time.
+    Dedicated,
+}
+
+impl Squaring {
+    /// Squares `value` the chosen way.
+    fn apply<B: Backend, W: Word, const N: usize, M: FieldRep<W, N>>(
+        self,
+        value: MontgomeryWordRef<B, W, N, M>,
+    ) -> MontgomeryWordRef<B, W, N, M> {
+        return match self {
+            Squaring::Multiplication => value.clone() * value,
+            Squaring::Dedicated => value.square(),
+        };
+    }
 }
 
 /// Supplies the per-window point tables for fixed-base comb scalar multiplication
@@ -579,7 +971,6 @@ impl<W: Word, const N: usize, C: Curve<W, N>> WindowTables<W, N, C>
     }
 }
 
-
 /// Batched normalisation of Jacobian points to affine (`z = 1`), in place.
 fn normalize_affine<W: Word, const N: usize, C: Curve<W, N>>(
     buf: &mut [[MontgomeryWord<W, N, C::P>; 3]],
@@ -725,6 +1116,15 @@ impl<B: Backend, W: Word, const N: usize, C: Curve<W, N>> Clone for CurvePointRe
 }
 
 impl<B: Backend, W: Word, const N: usize, C: Curve<W, N>> CurvePointRef<B, W, N, C> {
+    /// A point from its affine coordinates, as [`Curve::mul_secret_scalar_affine`] returns them.
+    pub fn from_affine(
+        x: MontgomeryWordRef<B, W, N, C::P>,
+        y: MontgomeryWordRef<B, W, N, C::P>,
+        curve: C,
+    ) -> Self {
+        return Self::_affine(x, y, curve);
+    }
+
     /// Helper constructor for points in affine representation.
     fn _affine(
         x: MontgomeryWordRef<B, W, N, C::P>,
