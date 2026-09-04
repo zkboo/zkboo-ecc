@@ -3,7 +3,7 @@
 //! The Ed25519 twisted Edwards curve `-x² + y² = 1 + d·x²·y²` over `GF(2²⁵⁵ - 19)`, as used by
 //! Solana (and Ed25519 signatures generally), implemented with 4×u64 limbs.
 
-use crate::montgomery::select_const_coord;
+use crate::weierstrass::select_const_coord;
 use alloc::vec::Vec;
 use zkboo::backend::{Backend, BooleanWordRef, WordRef};
 use zkboo::word::CompositeWord;
@@ -73,7 +73,7 @@ fn two_d() -> Fe25519 {
 
 /// An Ed25519 point in extended homogeneous coordinates (build-time, cleartext).
 #[derive(Debug, Clone, Copy)]
-pub struct EdwardsPoint {
+pub struct Point {
     x: Fe25519,
     y: Fe25519,
     z: Fe25519,
@@ -83,16 +83,16 @@ pub struct EdwardsPoint {
 /// A public Ed25519 point in Niels form `(y+x, y-x, 2d·xy)` with `z = 1`: the shape stored in
 /// fixed-base comb tables and consumed by mixed addition.
 #[derive(Debug, Clone, Copy)]
-pub struct EdwardsNiels {
+pub struct Niels {
     y_plus_x: Fe25519,
     y_minus_x: Fe25519,
     t_2d: Fe25519,
 }
 
-impl EdwardsPoint {
+impl Point {
     /// The identity point `(0, 1)`.
     pub fn identity() -> Self {
-        return EdwardsPoint {
+        return Point {
             x: Ed25519Field.zero_word(),
             y: Ed25519Field.one_word(),
             z: Ed25519Field.one_word(),
@@ -120,7 +120,7 @@ impl EdwardsPoint {
             ]),
             Ed25519Field,
         );
-        return EdwardsPoint {
+        return Point {
             x,
             y,
             z: Ed25519Field.one_word(),
@@ -139,7 +139,7 @@ impl EdwardsPoint {
         let h = pp + mm;
         let g = zz2 + tt2d;
         let f = zz2 - tt2d;
-        return EdwardsPoint {
+        return Point {
             x: e * f,
             y: g * h,
             z: f * g,
@@ -159,9 +159,9 @@ impl EdwardsPoint {
     }
 
     /// The Niels form `(y+x, y-x, 2d·xy)` of this point, normalised to `z = 1`.
-    pub fn to_niels(self) -> EdwardsNiels {
+    pub fn to_niels(self) -> Niels {
         let (x, y) = self.to_affine();
-        return EdwardsNiels {
+        return Niels {
             y_plus_x: y + x,
             y_minus_x: y - x,
             t_2d: x * y * two_d(),
@@ -171,16 +171,16 @@ impl EdwardsPoint {
 
 /// An Ed25519 point in extended homogeneous coordinates (circuit values).
 #[derive(Debug)]
-pub struct EdwardsPointRef<B: Backend> {
+pub struct PointRef<B: Backend> {
     x: Fe25519Ref<B>,
     y: Fe25519Ref<B>,
     z: Fe25519Ref<B>,
     t: Fe25519Ref<B>,
 }
 
-impl<B: Backend> Clone for EdwardsPointRef<B> {
+impl<B: Backend> Clone for PointRef<B> {
     fn clone(&self) -> Self {
-        return EdwardsPointRef {
+        return PointRef {
             x: self.x.clone(),
             y: self.y.clone(),
             z: self.z.clone(),
@@ -189,7 +189,7 @@ impl<B: Backend> Clone for EdwardsPointRef<B> {
     }
 }
 
-impl<B: Backend> EdwardsPointRef<B> {
+impl<B: Backend> PointRef<B> {
     /// Mixed complete addition of a selected table point in Niels form (`z = 1`).
     fn add_niels(
         self,
@@ -205,7 +205,7 @@ impl<B: Backend> EdwardsPointRef<B> {
         let h = pp + mm;
         let g = zz2.clone() + tt2d.clone();
         let f = zz2 - tt2d;
-        return EdwardsPointRef {
+        return PointRef {
             x: e.clone() * f.clone(),
             y: g.clone() * h.clone(),
             z: f * g,
@@ -239,33 +239,33 @@ impl<B: Backend> EdwardsPointRef<B> {
 /// Supplies the per-window Niels-form point tables for fixed-base comb scalar multiplication: for
 /// base point `P` and window width `w`, the table for window `k` holds `j · 2^{w·k} · P, j = 0 ..
 /// 2^{bits_in_window(k)}`.
-pub trait EdwardsWindowTables {
+pub trait WindowTables {
     /// The window width `w` in bits.
     fn window_bits(&self) -> usize;
 
     /// The table for window `k`.
-    fn window(&mut self, k: usize) -> &[EdwardsNiels];
+    fn window(&mut self, k: usize) -> &[Niels];
 }
 
-/// The default [EdwardsWindowTables]: precomputes every window's table eagerly at construction,
+/// The default [WindowTables]: precomputes every window's table eagerly at construction,
 /// normalising all entries to Niels form with a **single batched field inversion** (Montgomery's
 /// trick) — a per-entry inversion would dominate the whole multiplication on the build-time side.
 #[derive(Debug, Clone)]
-pub struct ComputedEdwardsWindowTables {
+pub struct ComputedWindowTables {
     window_bits: usize,
-    windows: Vec<Vec<EdwardsNiels>>,
+    windows: Vec<Vec<Niels>>,
 }
 
-impl ComputedEdwardsWindowTables {
+impl ComputedWindowTables {
     /// A comb-table source for `base`, with the given window width.
-    pub fn new(base: EdwardsPoint, window_bits: usize) -> Self {
+    pub fn new(base: Point, window_bits: usize) -> Self {
         // All table points in extended coordinates: window k holds j · 2^{w·k} · base.
-        let mut window_points: Vec<Vec<EdwardsPoint>> = Vec::new();
+        let mut window_points: Vec<Vec<Point>> = Vec::new();
         let mut base_k = base;
         for k in 0..256usize.div_ceil(window_bits) {
             let bits_in_window = core::cmp::min(window_bits, 256 - k * window_bits);
             let mut row = Vec::with_capacity(1usize << bits_in_window);
-            let mut acc = EdwardsPoint::identity();
+            let mut acc = Point::identity();
             row.push(acc);
             for _ in 1..(1usize << bits_in_window) {
                 acc = acc.add(base_k);
@@ -278,7 +278,7 @@ impl ComputedEdwardsWindowTables {
         }
         // Batched inversion of every z (all nonzero on Edwards curves): prefix products,
         // one inversion, then walk back multiplying out each individual inverse.
-        let flat: Vec<&EdwardsPoint> = window_points.iter().flatten().collect();
+        let flat: Vec<&Point> = window_points.iter().flatten().collect();
         let mut prefix = Vec::with_capacity(flat.len());
         let mut running = Ed25519Field.one_word();
         for point in &flat {
@@ -301,7 +301,7 @@ impl ComputedEdwardsWindowTables {
                         let z_inv = z_invs.next().expect("one inverse per entry");
                         let x = point.x * z_inv;
                         let y = point.y * z_inv;
-                        return EdwardsNiels {
+                        return Niels {
                             y_plus_x: y + x,
                             y_minus_x: y - x,
                             t_2d: x * y * two_d(),
@@ -310,31 +310,31 @@ impl ComputedEdwardsWindowTables {
                     .collect()
             })
             .collect();
-        return ComputedEdwardsWindowTables {
+        return ComputedWindowTables {
             window_bits,
             windows,
         };
     }
 }
 
-impl EdwardsWindowTables for ComputedEdwardsWindowTables {
+impl WindowTables for ComputedWindowTables {
     #[inline]
     fn window_bits(&self) -> usize {
         return self.window_bits;
     }
 
-    fn window(&mut self, k: usize) -> &[EdwardsNiels] {
+    fn window(&mut self, k: usize) -> &[Niels] {
         return &self.windows[k];
     }
 }
 
 /// Fixed-base scalar multiplication by a **secret** (circuit-value) scalar, data-oblivious.
-pub fn edwards_mul_secret_scalar<B: Backend>(
+pub fn mul_secret_scalar<B: Backend>(
     scalar: WordRef<B, u64, 4>,
-    tables: &mut impl EdwardsWindowTables,
-) -> EdwardsPointRef<B> {
+    tables: &mut impl WindowTables,
+) -> PointRef<B> {
     let w = tables.window_bits();
-    let mut acc: Option<EdwardsPointRef<B>> = None;
+    let mut acc: Option<PointRef<B>> = None;
     for k in 0..256usize.div_ceil(w) {
         let bits_in_window = core::cmp::min(w, 256 - k * w);
         let window_bits: Vec<BooleanWordRef<B>> = (0..bits_in_window)
@@ -356,7 +356,7 @@ pub fn edwards_mul_secret_scalar<B: Backend>(
         acc = Some(match acc {
             None => {
                 // Fold the first selection into a fresh identity accumulator built as constants.
-                let identity = EdwardsPointRef {
+                let identity = PointRef {
                     x: y_plus_x.clone().into_const(CompositeWord::ZERO),
                     y: y_plus_x.clone().into_const(CompositeWord::ONE),
                     z: y_plus_x.clone().into_const(CompositeWord::ONE),

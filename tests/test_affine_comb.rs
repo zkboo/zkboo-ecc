@@ -14,7 +14,7 @@ use zkboo::{
     executor::{OwnedFlexibleWordPool, exec},
     word::{CompositeWord, Words},
 };
-use zkboo_ecc::montgomery::{AffineCombAdvice, Curve, PrecomputedWindowTables, Squaring};
+use zkboo_ecc::weierstrass::{AffineCombAdvice, Curve, PrecomputedWindowTables, Squaring};
 use zkboo_ecc::secp256k1::{Secp256k1, Secp256k1PM};
 use zkboo::executor::ExecOptions;
 

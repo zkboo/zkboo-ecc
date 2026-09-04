@@ -17,7 +17,7 @@ use zkboo::{
     executor::{OwnedFlexibleWordPool, exec},
     word::{CompositeWord, Words},
 };
-use zkboo_ecc::montgomery::{Curve, PointFrontendIO};
+use zkboo_ecc::weierstrass::{Curve, PointFrontendIO};
 use zkboo_ecc::secp256k1::{Secp256k1, Secp256k1PM};
 use zkboo::executor::ExecOptions;
 

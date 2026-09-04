@@ -2,7 +2,7 @@
 
 //! The secp256k1 curve, as used by Bitcoin and Ethereum, implemented with 4×u64 limbs.
 
-use crate::montgomery::{Curve, CurvePoint};
+use crate::weierstrass::{Curve, Point};
 use zkboo::word::CompositeWord;
 use zkboo_modular::montgomery::{MontgomeryMod, MontgomeryWord};
 use zkboo_modular::pseudo_mersenne::PseudoMersenneMod;
@@ -72,7 +72,7 @@ impl Curve<u64, 4> for Secp256k1 {
         return MontgomeryWord::new(CompositeWord::from_be_words([0, 0, 0, 7]), Secp256k1Field);
     }
 
-    fn g(&self) -> CurvePoint<u64, 4, Self> {
+    fn g(&self) -> Point<u64, 4, Self> {
         let x = MontgomeryWord::new(
             CompositeWord::from_be_words([
                 0x79be667ef9dcbbac,
@@ -143,7 +143,7 @@ impl Curve<u64, 4> for Secp256k1PM {
         return MontgomeryWord::new(CompositeWord::from_be_words([0, 0, 0, 7]), Secp256k1FieldPM);
     }
 
-    fn g(&self) -> CurvePoint<u64, 4, Self> {
+    fn g(&self) -> Point<u64, 4, Self> {
         let x = MontgomeryWord::new(
             CompositeWord::from_be_words([
                 0x79be667ef9dcbbac,

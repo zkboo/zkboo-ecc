@@ -12,7 +12,7 @@ use zkboo::{
     executor::{OwnedFlexibleWordPool, exec},
     word::{CompositeWord, Words},
 };
-use zkboo_ecc::montgomery::{
+use zkboo_ecc::weierstrass::{
     ComputedWindowTables, Curve, PointFrontendIO, PrecomputedWindowTables, WindowTables,
     comb_window_count,
 };

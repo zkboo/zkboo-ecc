@@ -13,7 +13,7 @@ use zkboo::{
     executor::{OwnedFlexibleWordPool, exec},
     word::{CompositeWord, Words},
 };
-use zkboo_ecc::montgomery::{Curve, CurvePoint};
+use zkboo_ecc::weierstrass::{Curve, Point};
 use zkboo_ecc::secp256k1::{Secp256k1, Secp256k1PM};
 use zkboo_modular::montgomery::MontgomeryMod;
 use zkboo::executor::ExecOptions;
@@ -32,7 +32,7 @@ fn p() -> UBig {
 }
 
 /// Canonical (x, y, z) of a curve point, decoded out of its field representation.
-fn coords<C: Curve<u64, 4>>(pt: &CurvePoint<u64, 4, C>) -> (UBig, UBig, UBig) {
+fn coords<C: Curve<u64, 4>>(pt: &Point<u64, 4, C>) -> (UBig, UBig, UBig) {
     let [x, y, z] = pt.coords();
     (to_ubig(x.value()), to_ubig(y.value()), to_ubig(z.value()))
 }
@@ -85,7 +85,7 @@ struct PmFixedBaseEqNative {
 }
 impl Circuit for PmFixedBaseEqNative {
     fn exec<B: Backend>(&self, fe: &Frontend<B>) {
-        use zkboo_ecc::montgomery::PointFrontendIO;
+        use zkboo_ecc::weierstrass::PointFrontendIO;
         let got = Secp256k1PM.g().mul_secret_scalar(fe.input(self.scalar));
         let want = fe.point_input(Secp256k1PM.g() * self.scalar);
         fe.output(got.eq(want).into());

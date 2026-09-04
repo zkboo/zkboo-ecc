@@ -35,7 +35,7 @@ pub trait Curve<W: Word, const N: usize>: Clone + Copy + PartialEq + Eq + Debug 
     /// The base point `g` of the curve.
     ///
     /// Implementations must guarantee that `self.g().curve() == self`.
-    fn g(&self) -> CurvePoint<W, N, Self>;
+    fn g(&self) -> Point<W, N, Self>;
 
     /// The order of the base point [`g`](Curve::g).
     ///
@@ -44,8 +44,8 @@ pub trait Curve<W: Word, const N: usize>: Clone + Copy + PartialEq + Eq + Debug 
     fn n(&self) -> CompositeWord<W, N>;
 
     /// The zero element of the curve.
-    fn zero(&self) -> CurvePoint<W, N, Self> {
-        return CurvePoint::_inf(*self);
+    fn zero(&self) -> Point<W, N, Self> {
+        return Point::_inf(*self);
     }
 
     /// A point on the curve in Jacobian representation.
@@ -54,7 +54,7 @@ pub trait Curve<W: Word, const N: usize>: Clone + Copy + PartialEq + Eq + Debug 
         x: MontgomeryWord<W, N, Self::P>,
         y: MontgomeryWord<W, N, Self::P>,
         z: MontgomeryWord<W, N, Self::P>,
-    ) -> CurvePoint<W, N, Self> {
+    ) -> Point<W, N, Self> {
         assert!(self.contains_const([x, y, z]), "Point not on curve");
         return self.unchecked_point(x, y, z);
     }
@@ -64,7 +64,7 @@ pub trait Curve<W: Word, const N: usize>: Clone + Copy + PartialEq + Eq + Debug 
         &self,
         x: MontgomeryWord<W, N, Self::P>,
         y: MontgomeryWord<W, N, Self::P>,
-    ) -> CurvePoint<W, N, Self> {
+    ) -> Point<W, N, Self> {
         assert!(
             self.contains_const([x, y, self.p().one_word()]),
             "Point not on curve"
@@ -81,8 +81,8 @@ pub trait Curve<W: Word, const N: usize>: Clone + Copy + PartialEq + Eq + Debug 
         x: MontgomeryWord<W, N, Self::P>,
         y: MontgomeryWord<W, N, Self::P>,
         z: MontgomeryWord<W, N, Self::P>,
-    ) -> CurvePoint<W, N, Self> {
-        return CurvePoint::_jacobian(x, y, z, *self);
+    ) -> Point<W, N, Self> {
+        return Point::_jacobian(x, y, z, *self);
     }
 
     /// An unchecked point on the curve in affine representation.
@@ -93,8 +93,8 @@ pub trait Curve<W: Word, const N: usize>: Clone + Copy + PartialEq + Eq + Debug 
         &self,
         x: MontgomeryWord<W, N, Self::P>,
         y: MontgomeryWord<W, N, Self::P>,
-    ) -> CurvePoint<W, N, Self> {
-        return CurvePoint::_affine(x, y, *self);
+    ) -> Point<W, N, Self> {
+        return Point::_affine(x, y, *self);
     }
 
     /// Helper method to check if a point with given coordinates is on the curve.
@@ -118,9 +118,9 @@ pub trait Curve<W: Word, const N: usize>: Clone + Copy + PartialEq + Eq + Debug 
         &self,
         scalar: WordRef<B, W, N>,
         tables: &mut impl WindowTables<W, N, Self>,
-    ) -> CurvePointRef<B, W, N, Self> {
+    ) -> PointRef<B, W, N, Self> {
         let mut recoding = CombRecoding::new(scalar, self.n(), tables.window_bits());
-        let mut res: Option<CurvePointRef<B, W, N, Self>> = None;
+        let mut res: Option<PointRef<B, W, N, Self>> = None;
         for k in 0..recoding.num_windows() {
             let is_top = k + 1 == recoding.num_windows();
             let (sign_neg, index_bits) = recoding.next_digit();
@@ -520,14 +520,14 @@ fn host_affine_add<W: Word, const N: usize, M: FieldRep<W, N>>(
 /// A point on an elliptic curve in short Weierstrass form, in Jacobian representation,
 /// with coordinates in Montgomery form.
 #[derive(Debug, Clone, Copy, Hash)]
-pub struct CurvePoint<W: Word, const N: usize, C: Curve<W, N>> {
+pub struct Point<W: Word, const N: usize, C: Curve<W, N>> {
     x: MontgomeryWord<W, N, C::P>,
     y: MontgomeryWord<W, N, C::P>,
     z: MontgomeryWord<W, N, C::P>,
     curve: C,
 }
 
-impl<W: Word, const N: usize, C: Curve<W, N>> CurvePoint<W, N, C> {
+impl<W: Word, const N: usize, C: Curve<W, N>> Point<W, N, C> {
     /// Helper constructor for points in affine representation.
     fn _affine(x: MontgomeryWord<W, N, C::P>, y: MontgomeryWord<W, N, C::P>, curve: C) -> Self {
         return Self {
@@ -584,7 +584,7 @@ impl<W: Word, const N: usize, C: Curve<W, N>> CurvePoint<W, N, C> {
     /// Convert the point to affine representation.
     ///
     /// Available only for Montgomery fields, as it uses the build-time constant inverse
-    /// [`MontgomeryWord::inv`]. The in-circuit [`CurvePointRef::to_affine`] works for any field.
+    /// [`MontgomeryWord::inv`]. The in-circuit [`PointRef::to_affine`] works for any field.
     pub fn to_affine(self) -> Self
     where
         C::P: MontgomeryMod<W, N>,
@@ -687,7 +687,7 @@ impl<W: Word, const N: usize, C: Curve<W, N>> CurvePoint<W, N, C> {
     pub fn mul_secret_scalar<B: Backend>(
         self,
         scalar: WordRef<B, W, N>,
-    ) -> CurvePointRef<B, W, N, C> {
+    ) -> PointRef<B, W, N, C> {
         let curve = self.curve;
         let mut tables = ComputedWindowTables::new(self, DEFAULT_COMB_WINDOW_BITS);
         return curve.mul_secret_scalar(scalar, &mut tables);
@@ -731,9 +731,9 @@ fn select_signed_point<B: Backend, W: Word, const N: usize, C: Curve<W, N>>(
     sign_neg: BooleanWordRef<B>,
     table: &[[MontgomeryWord<W, N, C::P>; 3]],
     curve: C,
-) -> CurvePointRef<B, W, N, C> {
+) -> PointRef<B, W, N, C> {
     let (x, y) = select_signed_affine::<B, W, N, C>(index_bits, sign_neg, table);
-    return CurvePointRef::_affine(x, y, curve);
+    return PointRef::_affine(x, y, curve);
 }
 
 /// The affine coordinates of [`select_signed_point`], without wrapping them into a point.
@@ -766,7 +766,7 @@ fn affine_add_from_slope<B: Backend, W: Word, const N: usize, M: FieldRep<W, N>>
     return (x3, y3);
 }
 
-/// Default comb window width for [`CurvePoint::mul_secret_scalar`] — a strong reduction in
+/// Default comb window width for [`Point::mul_secret_scalar`] — a strong reduction in
 /// nonlinear gates with a small per-window table (`2^(w−1)` affine points, ~2 KiB at `w = 5`),
 /// suitable for a memory- and flash-constrained on-device prover: at this width the base-point
 /// table fits the device's app flash.
@@ -807,7 +807,7 @@ impl Squaring {
 }
 
 /// Supplies the per-window point tables for fixed-base comb scalar multiplication
-/// ([`Curve::mul_secret_scalar`] / [`CurvePoint::mul_secret_scalar`]).
+/// ([`Curve::mul_secret_scalar`] / [`Point::mul_secret_scalar`]).
 pub trait WindowTables<W: Word, const N: usize, C: Curve<W, N>> {
     /// The window width `w` in bits; the scalar is consumed `w` bits at a time.
     fn window_bits(&self) -> usize;
@@ -822,8 +822,8 @@ pub trait WindowTables<W: Word, const N: usize, C: Curve<W, N>> {
 #[derive(Debug, Clone)]
 pub struct ComputedWindowTables<W: Word, const N: usize, C: Curve<W, N>> {
     curve: C,
-    base: CurvePoint<W, N, C>,
-    base_k: CurvePoint<W, N, C>,
+    base: Point<W, N, C>,
+    base_k: Point<W, N, C>,
     next_k: usize,
     window_bits: usize,
     buf: Vec<[MontgomeryWord<W, N, C::P>; 3]>,
@@ -831,7 +831,7 @@ pub struct ComputedWindowTables<W: Word, const N: usize, C: Curve<W, N>> {
 
 impl<W: Word, const N: usize, C: Curve<W, N>> ComputedWindowTables<W, N, C> {
     /// A comb-table source for `base`, with the given window width.
-    pub fn new(base: CurvePoint<W, N, C>, window_bits: usize) -> Self {
+    pub fn new(base: Point<W, N, C>, window_bits: usize) -> Self {
         return Self {
             curve: base.curve(),
             base,
@@ -903,7 +903,7 @@ pub struct PrecomputedWindowTables<W: Word, const N: usize, C: Curve<W, N>> {
 
 impl<W: Word, const N: usize, C: Curve<W, N>> PrecomputedWindowTables<W, N, C> {
     /// Builds the full comb table for `base` at the given window width.
-    pub fn new(base: CurvePoint<W, N, C>, window_bits: usize) -> Self {
+    pub fn new(base: Point<W, N, C>, window_bits: usize) -> Self {
         assert!(
             window_bits >= 2,
             "window width must be at least 2 bits, got {window_bits}"
@@ -997,7 +997,7 @@ fn normalize_affine<W: Word, const N: usize, C: Curve<W, N>>(
     }
 }
 
-impl<W: Word, const N: usize, C: Curve<W, N>> Neg for CurvePoint<W, N, C> {
+impl<W: Word, const N: usize, C: Curve<W, N>> Neg for Point<W, N, C> {
     type Output = Self;
     /// Point negation on the [Curve].
     fn neg(self) -> Self::Output {
@@ -1006,7 +1006,7 @@ impl<W: Word, const N: usize, C: Curve<W, N>> Neg for CurvePoint<W, N, C> {
     }
 }
 
-impl<W: Word, const N: usize, C: Curve<W, N>> Add for CurvePoint<W, N, C> {
+impl<W: Word, const N: usize, C: Curve<W, N>> Add for Point<W, N, C> {
     type Output = Self;
     /// Point addition on the [Curve].
     fn add(self, rhs: Self) -> Self::Output {
@@ -1050,13 +1050,13 @@ impl<W: Word, const N: usize, C: Curve<W, N>> Add for CurvePoint<W, N, C> {
     }
 }
 
-impl<W: Word, const N: usize, C: Curve<W, N>> AddAssign for CurvePoint<W, N, C> {
+impl<W: Word, const N: usize, C: Curve<W, N>> AddAssign for Point<W, N, C> {
     fn add_assign(&mut self, rhs: Self) {
         *self = *self + rhs;
     }
 }
 
-impl<W: Word, const N: usize, C: Curve<W, N>> Sub for CurvePoint<W, N, C> {
+impl<W: Word, const N: usize, C: Curve<W, N>> Sub for Point<W, N, C> {
     type Output = Self;
     /// Point subtraction on the [Curve].
     fn sub(self, rhs: Self) -> Self::Output {
@@ -1064,13 +1064,13 @@ impl<W: Word, const N: usize, C: Curve<W, N>> Sub for CurvePoint<W, N, C> {
     }
 }
 
-impl<W: Word, const N: usize, C: Curve<W, N>> SubAssign for CurvePoint<W, N, C> {
+impl<W: Word, const N: usize, C: Curve<W, N>> SubAssign for Point<W, N, C> {
     fn sub_assign(&mut self, rhs: Self) {
         *self = *self - rhs;
     }
 }
 
-impl<W: Word, const N: usize, C: Curve<W, N>, U: WordLike<W, N>> Mul<U> for CurvePoint<W, N, C> {
+impl<W: Word, const N: usize, C: Curve<W, N>, U: WordLike<W, N>> Mul<U> for Point<W, N, C> {
     type Output = Self;
     /// Point multiplication by a scalar on the [Curve].
     fn mul(self, rhs: U) -> Self::Output {
@@ -1087,7 +1087,7 @@ impl<W: Word, const N: usize, C: Curve<W, N>, U: WordLike<W, N>> Mul<U> for Curv
     }
 }
 impl<W: Word, const N: usize, C: Curve<W, N>, U: WordLike<W, N>> MulAssign<U>
-    for CurvePoint<W, N, C>
+    for Point<W, N, C>
 {
     fn mul_assign(&mut self, rhs: U) {
         *self = *self * rhs;
@@ -1097,14 +1097,14 @@ impl<W: Word, const N: usize, C: Curve<W, N>, U: WordLike<W, N>> MulAssign<U>
 /// Reference to a point on an elliptic curve in short Weierstrass form, in Jacobian representation,
 /// with coordinates in Montgomery form.
 #[derive(Debug)]
-pub struct CurvePointRef<B: Backend, W: Word, const N: usize, C: Curve<W, N>> {
+pub struct PointRef<B: Backend, W: Word, const N: usize, C: Curve<W, N>> {
     x: MontgomeryWordRef<B, W, N, C::P>,
     y: MontgomeryWordRef<B, W, N, C::P>,
     z: MontgomeryWordRef<B, W, N, C::P>,
     curve: C,
 }
 
-impl<B: Backend, W: Word, const N: usize, C: Curve<W, N>> Clone for CurvePointRef<B, W, N, C> {
+impl<B: Backend, W: Word, const N: usize, C: Curve<W, N>> Clone for PointRef<B, W, N, C> {
     fn clone(&self) -> Self {
         return Self {
             x: self.x.clone(),
@@ -1115,7 +1115,7 @@ impl<B: Backend, W: Word, const N: usize, C: Curve<W, N>> Clone for CurvePointRe
     }
 }
 
-impl<B: Backend, W: Word, const N: usize, C: Curve<W, N>> CurvePointRef<B, W, N, C> {
+impl<B: Backend, W: Word, const N: usize, C: Curve<W, N>> PointRef<B, W, N, C> {
     /// A point from its affine coordinates, as [`Curve::mul_secret_scalar_affine`] returns them.
     pub fn from_affine(
         x: MontgomeryWordRef<B, W, N, C::P>,
@@ -1272,7 +1272,7 @@ impl<B: Backend, W: Word, const N: usize, C: Curve<W, N>> CurvePointRef<B, W, N,
 
     /// Check if two points are equal, without affine conversion.
     ///
-    /// Branch-less (data-oblivious) analogue of [CurvePoint::eq]: works directly on the Jacobian
+    /// Branch-less (data-oblivious) analogue of [Point::eq]: works directly on the Jacobian
     /// coordinates and returns a [BooleanWordRef] rather than branching on secret values. Two
     /// points are equal iff (a) both are the point at infinity (`z == 0`), or (b) both are finite
     /// and their affine coordinates coincide, i.e. `x1·z2² == x2·z1²` and `y1·z2³ == y2·z1³`.
@@ -1298,7 +1298,7 @@ impl<B: Backend, W: Word, const N: usize, C: Curve<W, N>> CurvePointRef<B, W, N,
     }
 }
 
-impl<B: Backend, W: Word, const N: usize, C: Curve<W, N>> Neg for CurvePointRef<B, W, N, C> {
+impl<B: Backend, W: Word, const N: usize, C: Curve<W, N>> Neg for PointRef<B, W, N, C> {
     type Output = Self;
     /// Point negation on the [Curve].
     fn neg(self) -> Self::Output {
@@ -1307,7 +1307,7 @@ impl<B: Backend, W: Word, const N: usize, C: Curve<W, N>> Neg for CurvePointRef<
     }
 }
 
-impl<B: Backend, W: Word, const N: usize, C: Curve<W, N>> Add for CurvePointRef<B, W, N, C> {
+impl<B: Backend, W: Word, const N: usize, C: Curve<W, N>> Add for PointRef<B, W, N, C> {
     type Output = Self;
     /// Point addition on the [Curve].
     fn add(self, rhs: Self) -> Self::Output {
@@ -1343,14 +1343,14 @@ impl<B: Backend, W: Word, const N: usize, C: Curve<W, N>> Add for CurvePointRef<
         let z_sum = z1 + z2;
         let res_fff_z = h * (z_sum.clone() * z_sum - z1z1 - z2z2);
         return branch0.point_select(
-            CurvePointRef {
+            PointRef {
                 x: res_t_x,
                 y: res_t_y,
                 z: res_t_z,
                 curve,
             },
             branch1.point_select(
-                CurvePointRef {
+                PointRef {
                     x: res_ft_x,
                     y: res_ft_y,
                     z: res_ft_z,
@@ -1358,20 +1358,20 @@ impl<B: Backend, W: Word, const N: usize, C: Curve<W, N>> Add for CurvePointRef<
                 },
                 branch2.point_select(
                     branch3.point_select(
-                        CurvePointRef {
+                        PointRef {
                             x: res_fftt_x,
                             y: res_fftt_y,
                             z: res_fftt_z,
                             curve,
                         },
-                        CurvePointRef {
+                        PointRef {
                             x: res_fftf_x,
                             y: res_fftf_y,
                             z: res_fftf_z,
                             curve,
                         },
                     ),
-                    CurvePointRef {
+                    PointRef {
                         x: res_fff_x,
                         y: res_fff_y,
                         z: res_fff_z,
@@ -1383,13 +1383,13 @@ impl<B: Backend, W: Word, const N: usize, C: Curve<W, N>> Add for CurvePointRef<
     }
 }
 
-impl<B: Backend, W: Word, const N: usize, C: Curve<W, N>> AddAssign for CurvePointRef<B, W, N, C> {
+impl<B: Backend, W: Word, const N: usize, C: Curve<W, N>> AddAssign for PointRef<B, W, N, C> {
     fn add_assign(&mut self, rhs: Self) {
         *self = self.clone() + rhs;
     }
 }
 
-impl<B: Backend, W: Word, const N: usize, C: Curve<W, N>> Sub for CurvePointRef<B, W, N, C> {
+impl<B: Backend, W: Word, const N: usize, C: Curve<W, N>> Sub for PointRef<B, W, N, C> {
     type Output = Self;
     /// Point subtraction on the [Curve].
     fn sub(self, rhs: Self) -> Self::Output {
@@ -1397,14 +1397,14 @@ impl<B: Backend, W: Word, const N: usize, C: Curve<W, N>> Sub for CurvePointRef<
     }
 }
 
-impl<B: Backend, W: Word, const N: usize, C: Curve<W, N>> SubAssign for CurvePointRef<B, W, N, C> {
+impl<B: Backend, W: Word, const N: usize, C: Curve<W, N>> SubAssign for PointRef<B, W, N, C> {
     fn sub_assign(&mut self, rhs: Self) {
         *self = self.clone() - rhs;
     }
 }
 
 impl<B: Backend, W: Word, const N: usize, C: Curve<W, N>> Mul<CompositeWord<W, N>>
-    for CurvePointRef<B, W, N, C>
+    for PointRef<B, W, N, C>
 {
     type Output = Self;
     /// Point multiplication by a **public** (cleartext) scalar on the [Curve].
@@ -1421,7 +1421,7 @@ impl<B: Backend, W: Word, const N: usize, C: Curve<W, N>> Mul<CompositeWord<W, N
     }
 }
 impl<B: Backend, W: Word, const N: usize, C: Curve<W, N>> MulAssign<CompositeWord<W, N>>
-    for CurvePointRef<B, W, N, C>
+    for PointRef<B, W, N, C>
 {
     fn mul_assign(&mut self, rhs: CompositeWord<W, N>) {
         *self = self.clone() * rhs;
@@ -1429,7 +1429,7 @@ impl<B: Backend, W: Word, const N: usize, C: Curve<W, N>> MulAssign<CompositeWor
 }
 
 impl<B: Backend, W: Word, const N: usize, C: Curve<W, N>> Mul<WordRef<B, W, N>>
-    for CurvePointRef<B, W, N, C>
+    for PointRef<B, W, N, C>
 {
     type Output = Self;
     /// Point multiplication by a **secret** (circuit-value) scalar on the [Curve].
@@ -1444,7 +1444,7 @@ impl<B: Backend, W: Word, const N: usize, C: Curve<W, N>> Mul<WordRef<B, W, N>>
     }
 }
 impl<B: Backend, W: Word, const N: usize, C: Curve<W, N>> MulAssign<WordRef<B, W, N>>
-    for CurvePointRef<B, W, N, C>
+    for PointRef<B, W, N, C>
 {
     fn mul_assign(&mut self, rhs: WordRef<B, W, N>) {
         *self = self.clone() * rhs;
@@ -1455,9 +1455,9 @@ impl<B: Backend, W: Word, const N: usize, C: Curve<W, N>> MulAssign<WordRef<B, W
 pub trait PointBooleanWordRefSelector<B: Backend, W: Word, const N: usize, C: Curve<W, N>> {
     fn point_select(
         self,
-        then: CurvePointRef<B, W, N, C>,
-        else_: CurvePointRef<B, W, N, C>,
-    ) -> CurvePointRef<B, W, N, C>;
+        then: PointRef<B, W, N, C>,
+        else_: PointRef<B, W, N, C>,
+    ) -> PointRef<B, W, N, C>;
 }
 
 impl<B: Backend, W: Word, const N: usize, C: Curve<W, N>> PointBooleanWordRefSelector<B, W, N, C>
@@ -1466,9 +1466,9 @@ impl<B: Backend, W: Word, const N: usize, C: Curve<W, N>> PointBooleanWordRefSel
     /// Select between two curve points by a [BooleanWordRef].
     fn point_select(
         self,
-        then: CurvePointRef<B, W, N, C>,
-        else_: CurvePointRef<B, W, N, C>,
-    ) -> CurvePointRef<B, W, N, C> {
+        then: PointRef<B, W, N, C>,
+        else_: PointRef<B, W, N, C>,
+    ) -> PointRef<B, W, N, C> {
         assert_eq!(
             then.curve, else_.curve,
             "Cannot select between points on different curves."
@@ -1478,51 +1478,51 @@ impl<B: Backend, W: Word, const N: usize, C: Curve<W, N>> PointBooleanWordRefSel
         let x = self.clone().montgomery_select(x1, x2);
         let y = self.clone().montgomery_select(y1, y2);
         let z = self.montgomery_select(z1, z2);
-        return CurvePointRef { x, y, z, curve };
+        return PointRef { x, y, z, curve };
     }
 }
 
 /// Helper trait implementing point allocation for a [Frontend].
 pub trait PointFrontendIO<B: Backend, W: Word, const N: usize, C: Curve<W, N>> {
     /// Variant of [Frontend::input] for curve points.
-    fn point_input(&self, in_: CurvePoint<W, N, C>) -> CurvePointRef<B, W, N, C>;
+    fn point_input(&self, in_: Point<W, N, C>) -> PointRef<B, W, N, C>;
 
     /// Variant of [Frontend::alloc] for curve points.
-    fn point_alloc(&self, in_: CurvePoint<W, N, C>) -> CurvePointRef<B, W, N, C>;
+    fn point_alloc(&self, in_: Point<W, N, C>) -> PointRef<B, W, N, C>;
 
     /// Variant of [Frontend::output] for curve points, outputting in affine representation.
-    fn point_output_affine(&self, out: CurvePointRef<B, W, N, C>);
+    fn point_output_affine(&self, out: PointRef<B, W, N, C>);
 
     /// Variant of [Frontend::output] for curve points, outputting in Jacobian representation.
-    fn point_output_jacobian(&self, out: CurvePointRef<B, W, N, C>);
+    fn point_output_jacobian(&self, out: PointRef<B, W, N, C>);
 }
 
 impl<B: Backend, W: Word, const N: usize, C: Curve<W, N>> PointFrontendIO<B, W, N, C>
     for Frontend<B>
 {
-    fn point_input(&self, in_: CurvePoint<W, N, C>) -> CurvePointRef<B, W, N, C> {
+    fn point_input(&self, in_: Point<W, N, C>) -> PointRef<B, W, N, C> {
         let (x, y, z, curve) = in_.destructure();
         let x = self.montgomery_input(x);
         let y = self.montgomery_input(y);
         let z = self.montgomery_input(z);
-        return CurvePointRef { x, y, z, curve };
+        return PointRef { x, y, z, curve };
     }
 
-    fn point_alloc(&self, in_: CurvePoint<W, N, C>) -> CurvePointRef<B, W, N, C> {
+    fn point_alloc(&self, in_: Point<W, N, C>) -> PointRef<B, W, N, C> {
         let (x, y, z, curve) = in_.destructure();
         let x = self.montgomery_alloc(x);
         let y = self.montgomery_alloc(y);
         let z = self.montgomery_alloc(z);
-        return CurvePointRef { x, y, z, curve };
+        return PointRef { x, y, z, curve };
     }
 
-    fn point_output_affine(&self, out: CurvePointRef<B, W, N, C>) {
+    fn point_output_affine(&self, out: PointRef<B, W, N, C>) {
         let (x, y, _, _) = out.to_affine().destructure();
         self.montgomery_output(x);
         self.montgomery_output(y);
     }
 
-    fn point_output_jacobian(&self, out: CurvePointRef<B, W, N, C>) {
+    fn point_output_jacobian(&self, out: PointRef<B, W, N, C>) {
         let (x, y, z, _) = out.destructure();
         self.montgomery_output(x);
         self.montgomery_output(y);

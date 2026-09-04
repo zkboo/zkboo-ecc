@@ -18,7 +18,7 @@
 use zkboo::backend::{Backend, Frontend};
 use zkboo::circuit::Circuit;
 use zkboo::word::CompositeWord;
-use zkboo_ecc::montgomery::{Curve, PointFrontendIO};
+use zkboo_ecc::weierstrass::{Curve, PointFrontendIO};
 use zkboo_ecc::secp256k1::{Secp256k1, Secp256k1Field, Secp256k1PM};
 use zkboo_modular::montgomery::MontgomeryWordRef;
 use zkboo_profiling::profile;

@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 
 //! Validates the data-oblivious fixed-base scalar multiplication
-//! [`CurvePoint::mul_secret_scalar`] against the native (cleartext) scalar multiplication, for the
+//! [`Point::mul_secret_scalar`] against the native (cleartext) scalar multiplication, for the
 //! secp256k1 generator and a spread of secret scalars.
 //!
-//! The check is done with the in-circuit projective equality `CurvePointRef::eq` (no modular
+//! The check is done with the in-circuit projective equality `PointRef::eq` (no modular
 //! inversion / affine conversion), keeping the interpreter cost to the windowed additions alone.
 
 use zkboo::{
@@ -13,7 +13,7 @@ use zkboo::{
     executor::{OwnedFlexibleWordPool, exec},
     word::{CompositeWord, Words},
 };
-use zkboo_ecc::montgomery::{Curve, PointFrontendIO};
+use zkboo_ecc::weierstrass::{Curve, PointFrontendIO};
 use zkboo_ecc::secp256k1::Secp256k1;
 use zkboo::executor::ExecOptions;
 
