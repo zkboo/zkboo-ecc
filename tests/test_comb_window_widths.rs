@@ -21,6 +21,7 @@ use zkboo::{
 };
 use zkboo_ecc::montgomery::{ComputedWindowTables, Curve, PointFrontendIO};
 use zkboo_ecc::secp256k1::{Secp256k1, Secp256k1PM};
+use zkboo::executor::ExecOptions;
 
 type WP = OwnedFlexibleWordPool<usize>;
 
@@ -43,7 +44,7 @@ impl<C: Curve<u64, 4>> Circuit for CombEqNative<C> {
 }
 
 fn check<C: Curve<u64, 4>>(curve: C, scalar: CompositeWord<u64, 4>, w: usize) {
-    let outputs = exec::<_, WP>(&CombEqNative { curve, scalar, w });
+    let outputs = exec::<_, WP, _>(&CombEqNative { curve, scalar, w }, ExecOptions::new());
     let mut expected = Words::new();
     expected.as_vec_mut::<u8>().push(1);
     assert_eq!(outputs, expected, "comb wrong for w={w}, scalar={scalar:?}");

@@ -8,6 +8,7 @@ use zkboo::{
 };
 use zkboo_ecc::montgomery::{Curve, CurvePoint, PointFrontendIO};
 use zkboo_modular::montgomery::{MontgomeryMod, MontgomeryWord};
+use zkboo::executor::ExecOptions;
 
 /// Modulus for the secp256k1 curve, implemented using 4x u64 limbs.
 /// See https://std.neuromancer.sk/secg/secp256k1
@@ -287,8 +288,8 @@ macro_rules! test_func {
                         frontend.point_output_jacobian(out);
                     }
                 }
-                let expected_outputs = exec::<_, WP>(&TestCircuit { $($in_,)* });
-                let outputs = exec::<_, WP>(&ExecCircuit { $($in_,)* });
+                let expected_outputs = exec::<_, WP, _>(&TestCircuit { $($in_,)* }, ExecOptions::new());
+                let outputs = exec::<_, WP, _>(&ExecCircuit { $($in_,)* }, ExecOptions::new());
                 assert_eq!(expected_outputs, outputs);
             }
         }
@@ -310,7 +311,7 @@ fn eq_bit(a: CurvePoint<u64, 4, SECP256K1>, b: CurvePoint<u64, 4, SECP256K1>) ->
             frontend.output(a.eq(b).into());
         }
     }
-    return exec::<_, WP>(&EqCircuit { a, b }).u8[0];
+    return exec::<_, WP, _>(&EqCircuit { a, b }, ExecOptions::new()).u8[0];
 }
 
 #[test]

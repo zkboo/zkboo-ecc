@@ -16,6 +16,7 @@ use zkboo::{
 };
 use zkboo_ecc::montgomery::{AffineCombAdvice, Curve, PrecomputedWindowTables, Squaring};
 use zkboo_ecc::secp256k1::{Secp256k1, Secp256k1PM};
+use zkboo::executor::ExecOptions;
 
 type WP = OwnedFlexibleWordPool<usize>;
 type Word4 = CompositeWord<u64, 4>;
@@ -88,12 +89,12 @@ fn check<C: Curve<u64, 4>>(curve: C, scalar: Word4, w: usize) {
 }
 
 fn check_with<C: Curve<u64, 4>>(curve: C, scalar: Word4, w: usize, squaring: Squaring) {
-    let out = exec::<_, WP>(&AffineCombEqNative {
+    let out = exec::<_, WP, _>(&AffineCombEqNative {
         curve,
         scalar,
         w,
         squaring,
-    });
+    }, ExecOptions::new());
     let mut expected = Words::new();
     // The comparison's `1`, then the assertion word — which must also be `1`, or the slopes the
     // prover supplied were not the slopes the circuit asked for.
@@ -135,11 +136,11 @@ fn a_window_width_dividing_the_scalar_width_is_rejected() {
     std::panic::set_hook(std::boxed::Box::new(|_| {}));
     for w in [2usize, 4, 8, 16] {
         let result = std::panic::catch_unwind(|| {
-            exec::<_, WP>(&AffineCombOnly {
+            exec::<_, WP, _>(&AffineCombOnly {
                 curve: Secp256k1PM,
                 scalar: Word4::ONE,
                 w,
-            })
+            }, ExecOptions::new())
         });
         assert!(
             result.is_err(),
@@ -172,11 +173,11 @@ fn a_scalar_whose_product_is_infinity_fails_its_assertions() {
     // wrong, it is unprovable.
     for scalar in [Word4::ZERO, Secp256k1PM.n()] {
         for w in [5usize, 9] {
-            let out = exec::<_, WP>(&AffineCombOnly {
+            let out = exec::<_, WP, _>(&AffineCombOnly {
                 curve: Secp256k1PM,
                 scalar,
                 w,
-            });
+            }, ExecOptions::new());
             assert_eq!(
                 assertion_word(&out),
                 0,
