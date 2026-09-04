@@ -10,6 +10,7 @@ use zkboo::{
     executor::{OwnedFlexibleWordPool, exec},
 };
 use zkboo_ecc::edwards::{ComputedEdwardsWindowTables, EdwardsPoint, edwards_mul_secret_scalar};
+use zkboo::executor::ExecOptions;
 
 type WP = OwnedFlexibleWordPool<usize>;
 
@@ -81,9 +82,9 @@ fn to_hex(bytes: &[u8]) -> String {
 #[test]
 fn test_edwards_mul_known_answers() {
     for (scalar, expected) in VECTORS {
-        let out = exec::<_, WP>(&EdwardsMulCircuit {
+        let out = exec::<_, WP, _>(&EdwardsMulCircuit {
             scalars: vec![scalar],
-        })
+        }, ExecOptions::new())
         .u8;
         assert_eq!(to_hex(&out), expected);
     }
@@ -92,9 +93,9 @@ fn test_edwards_mul_known_answers() {
 #[test]
 fn test_edwards_mul_reused_tables() {
     // Two multiplications sharing one table source must both be correct.
-    let out = exec::<_, WP>(&EdwardsMulCircuit {
+    let out = exec::<_, WP, _>(&EdwardsMulCircuit {
         scalars: vec![VECTORS[1].0, VECTORS[3].0],
-    })
+    }, ExecOptions::new())
     .u8;
     assert_eq!(to_hex(&out[..32]), VECTORS[1].1);
     assert_eq!(to_hex(&out[32..]), VECTORS[3].1);

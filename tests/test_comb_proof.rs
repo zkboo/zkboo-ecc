@@ -32,6 +32,9 @@ use zkboo_ecc::montgomery::{AffineCombAdvice,
 };
 use zkboo_ecc::secp256k1::Secp256k1PM;
 use zkboo_modular::montgomery::MontgomeryFrontendIO;
+use zkboo::executor::ExecOptions;
+use zkboo::prover::proof::ProofOptions;
+use zkboo::verifier::VerifyOptions;
 
 type H = Keccak256Hasher;
 type PS = HashPRG<H>;
@@ -88,8 +91,8 @@ impl Circuit for JacobianComb {
 }
 
 fn prove_and_verify<C: Circuit + Sync>(circuit: &C, expected_output: &Words) -> bool {
-    let proof = prove::<_, H, PS, PV, S, WTP>(circuit, NUM_ITERS, SEED_ENTROPY, BINDING);
-    return verify::<_, H, PV, S, WPP>(circuit, expected_output, &proof, BINDING)
+    let proof = prove::<_, H, PS, PV, S, _, WTP, _>(circuit, NUM_ITERS, SEED_ENTROPY, BINDING, ProofOptions::new());
+    return verify::<_, H, PV, S, WPP, _>(circuit, expected_output, &proof, BINDING, VerifyOptions::new())
         .expect("verification errored");
 }
 
@@ -110,7 +113,7 @@ fn the_affine_comb_proves_and_verifies() {
             scalar: scalar(),
             squaring,
         };
-        let expected_output = exec::<_, WP>(&circuit);
+        let expected_output = exec::<_, WP, _>(&circuit, ExecOptions::new());
         // The assertion word must be satisfied, or the statement below is about a failed proof.
         assert_eq!(expected_output.u8, vec![1u8], "assertions not satisfied");
         assert!(
@@ -124,7 +127,7 @@ fn the_affine_comb_proves_and_verifies() {
 #[ignore = "proves and verifies a full secp256k1 statement; run explicitly in release mode"]
 fn the_jacobian_comb_proves_and_verifies() {
     let circuit = JacobianComb { scalar: scalar() };
-    let expected_output = exec::<_, WP>(&circuit);
+    let expected_output = exec::<_, WP, _>(&circuit, ExecOptions::new());
     assert!(
         prove_and_verify(&circuit, &expected_output),
         "a proof of the Jacobian comb did not verify"
@@ -133,11 +136,11 @@ fn the_jacobian_comb_proves_and_verifies() {
 
 #[test]
 fn the_affine_comb_and_the_jacobian_comb_agree() {
-    let affine = exec::<_, WP>(&AffineComb {
+    let affine = exec::<_, WP, _>(&AffineComb {
         scalar: scalar(),
         squaring: Squaring::Multiplication,
-    });
-    let jacobian = exec::<_, WP>(&JacobianComb { scalar: scalar() });
+    }, ExecOptions::new());
+    let jacobian = exec::<_, WP, _>(&JacobianComb { scalar: scalar() }, ExecOptions::new());
     // The affine comb asserts, so it emits a flag the Jacobian one has no reason to; the
     // coordinates are what has to agree.
     assert_eq!(
@@ -165,7 +168,7 @@ fn a_proof_of_a_violated_assertion_does_not_verify() {
         scalar: Secp256k1PM.n(),
         squaring: Squaring::Multiplication,
     };
-    let violated = exec::<_, WP>(&circuit);
+    let violated = exec::<_, WP, _>(&circuit, ExecOptions::new());
     assert_eq!(violated.u8, vec![0u8], "the assertion was not violated");
     let mut satisfied = violated.clone();
     satisfied.as_vec_mut::<u8>()[0] = 1;
@@ -204,7 +207,7 @@ fn the_host_window_width_also_proves_and_verifies() {
             asserts.output(fe);
         }
     }
-    let expected_output = exec::<_, WP>(&WideComb);
+    let expected_output = exec::<_, WP, _>(&WideComb, ExecOptions::new());
     assert!(
         prove_and_verify(&WideComb, &expected_output),
         "a proof at the host window width did not verify"

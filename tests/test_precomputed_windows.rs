@@ -17,6 +17,7 @@ use zkboo_ecc::montgomery::{
     comb_window_count,
 };
 use zkboo_ecc::secp256k1::Secp256k1PM;
+use zkboo::executor::ExecOptions;
 
 type WP = OwnedFlexibleWordPool<usize>;
 
@@ -94,7 +95,7 @@ fn the_comb_over_precomputed_tables_matches_the_native_reference() {
     expected.as_vec_mut::<u8>().push(1);
     for scalar in scalars {
         for w in [5, 8, 9] {
-            let outputs = exec::<_, WP>(&CombEqNative { scalar, w });
+            let outputs = exec::<_, WP, _>(&CombEqNative { scalar, w }, ExecOptions::new());
             assert_eq!(outputs, expected, "comb wrong for w={w}, scalar={scalar:?}");
         }
     }

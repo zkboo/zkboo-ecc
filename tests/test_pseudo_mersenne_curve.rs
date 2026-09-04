@@ -16,6 +16,7 @@ use zkboo::{
 use zkboo_ecc::montgomery::{Curve, CurvePoint};
 use zkboo_ecc::secp256k1::{Secp256k1, Secp256k1PM};
 use zkboo_modular::montgomery::MontgomeryMod;
+use zkboo::executor::ExecOptions;
 
 type WP = OwnedFlexibleWordPool<usize>;
 
@@ -102,7 +103,7 @@ fn pm_fixed_base_circuit() {
             0x0f1e2d3c4b5a6978,
         ]),
     ] {
-        let outputs = exec::<_, WP>(&PmFixedBaseEqNative { scalar: d });
+        let outputs = exec::<_, WP, _>(&PmFixedBaseEqNative { scalar: d }, ExecOptions::new());
         let mut expected = Words::new();
         expected.as_vec_mut::<u8>().push(1);
         assert_eq!(outputs, expected, "PM fixed-base != native for {d:?}");

@@ -15,6 +15,7 @@ use zkboo::{
 };
 use zkboo_ecc::montgomery::{Curve, PointFrontendIO};
 use zkboo_ecc::secp256k1::Secp256k1;
+use zkboo::executor::ExecOptions;
 
 type WP = OwnedFlexibleWordPool<usize>;
 
@@ -33,7 +34,7 @@ impl Circuit for FixedBaseEqNative {
 }
 
 fn check(scalar: CompositeWord<u64, 4>) {
-    let outputs = exec::<_, WP>(&FixedBaseEqNative { scalar });
+    let outputs = exec::<_, WP, _>(&FixedBaseEqNative { scalar }, ExecOptions::new());
     let mut expected = Words::new();
     expected.as_vec_mut::<u8>().push(1); // true
     assert_eq!(
