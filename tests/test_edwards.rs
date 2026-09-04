@@ -9,7 +9,7 @@ use zkboo::{
     circuit::Circuit,
     executor::{OwnedFlexibleWordPool, exec},
 };
-use zkboo_ecc::edwards::{ComputedEdwardsWindowTables, EdwardsPoint, edwards_mul_secret_scalar};
+use zkboo_ecc::edwards::{ComputedWindowTables, Point, mul_secret_scalar};
 use zkboo::executor::ExecOptions;
 
 type WP = OwnedFlexibleWordPool<usize>;
@@ -53,7 +53,7 @@ struct EdwardsMulCircuit {
 
 impl Circuit for EdwardsMulCircuit {
     fn exec<B: Backend>(&self, frontend: &Frontend<B>) {
-        let mut tables = ComputedEdwardsWindowTables::new(EdwardsPoint::base(), 5);
+        let mut tables = ComputedWindowTables::new(Point::base(), 5);
         for scalar in &self.scalars {
             let bytes = scalar
                 .iter()
@@ -66,7 +66,7 @@ impl Circuit for EdwardsMulCircuit {
                     .expect("8 bytes per limb")
             });
             let scalar = WordRef::from_le_words(limbs);
-            let point = edwards_mul_secret_scalar(scalar, &mut tables);
+            let point = mul_secret_scalar(scalar, &mut tables);
             point
                 .compress()
                 .into_iter()
@@ -105,13 +105,13 @@ fn test_edwards_mul_reused_tables() {
 fn test_edwards_host_arithmetic() {
     // 2B computed as B + B and as B.double() must agree with the known encoding, via the
     // circuit-free build-time path (checked through to_niels/to_affine consistency).
-    let b = EdwardsPoint::base();
+    let b = Point::base();
     let (x2, y2) = b.add(b).to_affine();
     let (x2d, y2d) = b.double().to_affine();
     assert_eq!(x2.value(), x2d.value());
     assert_eq!(y2.value(), y2d.value());
     // Adding the identity is a no-op.
-    let (xi, yi) = b.add(EdwardsPoint::identity()).to_affine();
+    let (xi, yi) = b.add(Point::identity()).to_affine();
     let (xb, yb) = b.to_affine();
     assert_eq!(xi.value(), xb.value());
     assert_eq!(yi.value(), yb.value());

@@ -7,7 +7,7 @@ use zkboo::{
     circuit::{Assertions, Circuit},
     word::CompositeWord,
 };
-use zkboo_ecc::montgomery::{AffineCombAdvice, Curve, PrecomputedWindowTables, Squaring};
+use zkboo_ecc::weierstrass::{AffineCombAdvice, Curve, PrecomputedWindowTables, Squaring};
 use zkboo_ecc::secp256k1::Secp256k1PM;
 use zkboo_modular::montgomery::MontgomeryFrontendIO;
 use zkboo_profiling::profile;

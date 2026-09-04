@@ -27,7 +27,7 @@ use zkboo::{
     verifier::{replay::OwnedFlexibleWordPairPool, verify},
     word::{CompositeWord, Words},
 };
-use zkboo_ecc::montgomery::{AffineCombAdvice, 
+use zkboo_ecc::weierstrass::{AffineCombAdvice, 
     Curve, HOST_COMB_WINDOW_BITS, PointFrontendIO, PrecomputedWindowTables, Squaring,
 };
 use zkboo_ecc::secp256k1::Secp256k1PM;

@@ -6,7 +6,7 @@ use zkboo::{
     executor::{OwnedFlexibleWordPool, exec},
     word::CompositeWord,
 };
-use zkboo_ecc::montgomery::{Curve, CurvePoint, PointFrontendIO};
+use zkboo_ecc::weierstrass::{Curve, Point, PointFrontendIO};
 use zkboo_modular::montgomery::{MontgomeryMod, MontgomeryWord};
 use zkboo::executor::ExecOptions;
 
@@ -93,7 +93,7 @@ impl Curve<u64, 4> for SECP256K1 {
         );
     }
 
-    fn g(&self) -> CurvePoint<u64, 4, Self> {
+    fn g(&self) -> Point<u64, 4, Self> {
         let x = MontgomeryWord::new(
             CompositeWord::from_be_words([
                 0x79be667ef9dcbbac,
@@ -224,7 +224,7 @@ fn test_mul_const() {
 
 #[test]
 fn test_to_affine_const() {
-    fn test_point(point: CurvePoint<u64, 4, SECP256K1>) {
+    fn test_point(point: Point<u64, 4, SECP256K1>) {
         assert!(
             SECP256K1.contains_const(point.coords()),
             "Point is not on the curve"
@@ -256,12 +256,12 @@ fn test_to_affine_const() {
 
 macro_rules! test_func {
     ($func: ident, $($in_: ident,)* $(,)? $body:block) => {
-        fn $func($($in_: CurvePoint<u64, 4, SECP256K1>,)*) {
+        fn $func($($in_: Point<u64, 4, SECP256K1>,)*) {
             {
                 type WP = OwnedFlexibleWordPool<usize>;
                 struct TestCircuit {
                     $(
-                        $in_: CurvePoint<u64, 4, SECP256K1>,
+                        $in_: Point<u64, 4, SECP256K1>,
                     )*
                 }
                 impl Circuit for TestCircuit {
@@ -276,7 +276,7 @@ macro_rules! test_func {
                 }
                 struct ExecCircuit {
                     $(
-                        $in_: CurvePoint<u64, 4, SECP256K1>,
+                        $in_: Point<u64, 4, SECP256K1>,
                     )*
                 }
                 impl Circuit for ExecCircuit {
@@ -296,13 +296,13 @@ macro_rules! test_func {
     };
 }
 
-/// Evaluate the data-oblivious `CurvePointRef::eq` (circuit version) on two points via the
+/// Evaluate the data-oblivious `PointRef::eq` (circuit version) on two points via the
 /// execution backend, returning the resulting boolean as a `u8` (1 = equal, 0 = not equal).
-fn eq_bit(a: CurvePoint<u64, 4, SECP256K1>, b: CurvePoint<u64, 4, SECP256K1>) -> u8 {
+fn eq_bit(a: Point<u64, 4, SECP256K1>, b: Point<u64, 4, SECP256K1>) -> u8 {
     type WP = OwnedFlexibleWordPool<usize>;
     struct EqCircuit {
-        a: CurvePoint<u64, 4, SECP256K1>,
-        b: CurvePoint<u64, 4, SECP256K1>,
+        a: Point<u64, 4, SECP256K1>,
+        b: Point<u64, 4, SECP256K1>,
     }
     impl Circuit for EqCircuit {
         fn exec<B: Backend>(&self, frontend: &Frontend<B>) {
