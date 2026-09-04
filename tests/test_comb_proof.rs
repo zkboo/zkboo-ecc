@@ -21,7 +21,7 @@
 use zkboo::{
     backend::{Backend, Frontend, WordRef},
     circuit::{Assertions, Circuit},
-    crypto::{HashPRG, Hasher, Keccak256Hasher},
+    crypto::{HashPRG, Hasher},
     executor::{OwnedFlexibleWordPool, exec},
     prover::{prove, views::OwnedFlexibleWordTriplePool},
     verifier::{replay::OwnedFlexibleWordPairPool, verify},
@@ -35,8 +35,42 @@ use zkboo_modular::montgomery::MontgomeryFrontendIO;
 use zkboo::executor::ExecOptions;
 use zkboo::prover::proof::ProofOptions;
 use zkboo::verifier::VerifyOptions;
+use zeroize::Zeroize;
 
-type H = Keccak256Hasher;
+/// A [Hasher] backed by BLAKE3, producing 32-byte digests.
+#[derive(Debug)]
+struct Blake3Hasher {
+    inner: blake3::Hasher,
+}
+
+impl Hasher for Blake3Hasher {
+    type Digest = [u8; 32];
+    const DIGEST_SIZE: usize = 32;
+
+    fn new() -> Self {
+        return Self {
+            inner: blake3::Hasher::new(),
+        };
+    }
+
+    fn update(&mut self, data: &[u8]) {
+        self.inner.update(data);
+    }
+
+    fn finalize_into(&mut self, out: &mut Self::Digest) {
+        let result = self.inner.finalize();
+        out.copy_from_slice(result.as_bytes());
+        self.inner.reset();
+    }
+}
+
+impl Zeroize for Blake3Hasher {
+    fn zeroize(&mut self) {
+        self.inner.reset();
+    }
+}
+
+type H = Blake3Hasher;
 type PS = HashPRG<H>;
 type PV = HashPRG<H>;
 type S = <H as Hasher>::Digest;
