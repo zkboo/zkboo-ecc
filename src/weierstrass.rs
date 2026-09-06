@@ -15,6 +15,7 @@ use zkboo::{
 use zeroize::Zeroize;
 use zkboo_modular::field::FieldRep;
 use zkboo_modular::montgomery::{
+    Montgomery,
     MontgomeryBooleanWordRefSelector, MontgomeryFrontendIO, MontgomeryMod, MontgomeryWord,
     MontgomeryWordRef,
 };
@@ -418,7 +419,7 @@ struct CombMirror<W: Word, const N: usize, C: Curve<W, N>> {
     /// The running affine accumulator, `None` until the first window has been consumed.
     acc: Option<(MontgomeryWord<W, N, C::P>, MontgomeryWord<W, N, C::P>)>,
     /// The slopes the last window yielded and the circuit has not yet asked for, in order.
-    stash: [Option<CompositeWord<W, N>>; 2],
+    stash: [Option<Montgomery<W, N>>; 2],
     curve: C,
 }
 
@@ -467,7 +468,7 @@ impl<W: Word, const N: usize, C: Curve<W, N>> CombMirror<W, N, C> {
     }
 
     /// The next stashed slope.
-    fn take_slope(&mut self) -> CompositeWord<W, N> {
+    fn take_slope(&mut self) -> Montgomery<W, N> {
         for slot in self.stash.iter_mut() {
             if let Some(slope) = slot.take() {
                 return slope;
@@ -505,11 +506,12 @@ impl<W: Word, const N: usize, C: Curve<W, N>> Drop for CombMirror<W, N, C> {
 /// replays a view, fingerprints a circuit or profiles one discards every input value it is given.
 pub(crate) fn advised_coords<B: Backend, W: Word, const N: usize, M: FieldRep<W, N>>(
     frontend: &Frontend<B>,
-    advice: Option<[CompositeWord<W, N>; 2]>,
+    advice: Option<[Montgomery<W, N>; 2]>,
     field: M,
 ) -> [MontgomeryWordRef<B, W, N, M>; 2] {
-    let values = advice.unwrap_or([CompositeWord::<W, N>::ZERO; 2]);
-    return values.map(|value| MontgomeryWordRef::from_inner(frontend.input(value), field));
+    let values = advice.unwrap_or([Montgomery::<W, N>::ZERO; 2]);
+    return values
+        .map(|value| MontgomeryWordRef::from_inner(frontend.input(value.into_raw()), field));
 }
 
 /// Allocates the comb's next slope as a circuit input.
@@ -523,9 +525,9 @@ fn input_slope<B: Backend, W: Word, const N: usize, C: Curve<W, N>, M: FieldRep<
 ) -> MontgomeryWordRef<B, W, N, M> {
     let value = match mirror {
         Some(mirror) => mirror.take_slope(),
-        None => CompositeWord::<W, N>::ZERO,
+        None => Montgomery::ZERO,
     };
-    return MontgomeryWordRef::from_inner(frontend.input(value), field);
+    return MontgomeryWordRef::from_inner(frontend.input(value.into_raw()), field);
 }
 
 /// The chord slope `(Y2 − Y1) / (X2 − X1)`, on the host.
@@ -536,8 +538,8 @@ fn host_chord_slope<W: Word, const N: usize, M: FieldRep<W, N>>(
     y2: MontgomeryWord<W, N, M>,
     field: M,
 ) -> MontgomeryWord<W, N, M> {
-    let denominator = field.invert_const((x2 - x1).into_inner());
-    return (y2 - y1) * MontgomeryWord::from_inner(denominator, field);
+    let denominator = field.invert_const((x2 - x1).into_inner().into_raw());
+    return (y2 - y1) * MontgomeryWord::from_inner(Montgomery::from_raw(denominator), field);
 }
 
 /// The tangent slope `(3·X² + a) / (2·Y)`, on the host.
@@ -548,8 +550,8 @@ fn host_tangent_slope<W: Word, const N: usize, M: FieldRep<W, N>>(
     field: M,
 ) -> MontgomeryWord<W, N, M> {
     let numerator = x * x + x * x + x * x + a;
-    let denominator = field.invert_const((y + y).into_inner());
-    return numerator * MontgomeryWord::from_inner(denominator, field);
+    let denominator = field.invert_const((y + y).into_inner().into_raw());
+    return numerator * MontgomeryWord::from_inner(Montgomery::from_raw(denominator), field);
 }
 
 /// `X3 = λ² − X1 − X2`, `Y3 = λ·(X1 − X3) − Y1`, on the host — the mirror of
@@ -1033,7 +1035,10 @@ fn normalize_affine<W: Word, const N: usize, C: Curve<W, N>>(
         running = running * entry[2];
     }
     let mut running_inv =
-        MontgomeryWord::from_inner(field.invert_const(running.into_inner()), field);
+        MontgomeryWord::from_inner(
+            Montgomery::from_raw(field.invert_const(running.into_inner().into_raw())),
+            field,
+        );
     for i in (0..buf.len()).rev() {
         let z_inv = running_inv * prefix[i];
         running_inv = running_inv * buf[i][2];
@@ -1282,7 +1287,7 @@ impl<B: Backend, W: Word, const N: usize, C: Curve<W, N>> PointRef<B, W, N, C> {
     pub fn to_affine_advised(
         self,
         frontend: &Frontend<B>,
-        advice: Option<[CompositeWord<W, N>; 2]>,
+        advice: Option<[Montgomery<W, N>; 2]>,
         assertions: &mut Assertions<B>,
     ) -> Self {
         let (x, y, z, curve) = self.destructure();
@@ -1624,10 +1629,10 @@ mod tests {
         mirror.zeroize();
         assert_eq!(mirror.recoding.t, CompositeWord::ZERO);
         let (x, y) = mirror.acc.expect("the accumulator is set after two windows");
-        assert_eq!(x.into_inner(), CompositeWord::ZERO);
-        assert_eq!(y.into_inner(), CompositeWord::ZERO);
+        assert_eq!(x.into_inner(), Montgomery::ZERO);
+        assert_eq!(y.into_inner(), Montgomery::ZERO);
         for slot in mirror.stash.iter() {
-            assert_eq!(slot.unwrap_or(CompositeWord::ZERO), CompositeWord::ZERO);
+            assert_eq!(slot.unwrap_or(Montgomery::ZERO), Montgomery::ZERO);
         }
     }
 }

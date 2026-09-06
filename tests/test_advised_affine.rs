@@ -14,7 +14,7 @@ use zkboo::{
 };
 use zkboo_ecc::secp256k1::Secp256k1PM;
 use zkboo_ecc::weierstrass::{Curve, PrecomputedWindowTables};
-use zkboo_modular::montgomery::MontgomeryFrontendIO;
+use zkboo_modular::montgomery::Montgomery;
 use zkboo_profiling::profile;
 
 type WP = OwnedFlexibleWordPool<usize>;
@@ -34,7 +34,7 @@ enum Convert {
     /// Compute the affine coordinates.
     Computed,
     /// Assert the affine coordinates against the given advice.
-    Advised([Word4; 2]),
+    Advised([Montgomery<u64, 4>; 2]),
 }
 
 struct Statement {
@@ -51,11 +51,13 @@ impl Circuit for Statement {
                 Convert::Computed => p.to_affine(),
                 Convert::Advised(advice) => p.to_affine_advised(fe, Some(advice), asserts),
             };
-            // The inner Montgomery values, which is what the assertion compares against and what
-            // the advised form takes back.
+            // The stored representation, which is what the assertion compares against and what the
+            // advised form takes back. `montgomery_output` would emit the canonical residue, which
+            // is a different word for a Montgomery modulus and the same one for a pseudo-Mersenne
+            // modulus — so getting this wrong is invisible on this curve and fatal on Ed25519.
             let [x, y, _] = out.into_coords();
-            fe.montgomery_output(x);
-            fe.montgomery_output(y);
+            fe.output(x.into_inner());
+            fe.output(y.into_inner());
         });
     }
 }
@@ -69,12 +71,16 @@ fn cost(convert: Convert) -> usize {
 }
 
 /// The advice a correct prover supplies, taken from the computed conversion.
-fn honest_advice() -> [Word4; 2] {
+fn honest_advice() -> [Montgomery<u64, 4>; 2] {
     let limbs = run(Convert::Computed).as_vec::<u64>().to_vec();
     assert_eq!(limbs.len(), 8, "two coordinates of four limbs each");
     return [
-        CompositeWord::from_le_words([limbs[0], limbs[1], limbs[2], limbs[3]]),
-        CompositeWord::from_le_words([limbs[4], limbs[5], limbs[6], limbs[7]]),
+        Montgomery::from_raw(CompositeWord::from_le_words([
+            limbs[0], limbs[1], limbs[2], limbs[3],
+        ])),
+        Montgomery::from_raw(CompositeWord::from_le_words([
+            limbs[4], limbs[5], limbs[6], limbs[7],
+        ])),
     ];
 }
 
@@ -92,7 +98,8 @@ fn asserted_coordinates_agree_with_computed_ones() {
 #[test]
 fn wrong_coordinates_violate_the_assertion() {
     let [x, y] = honest_advice();
-    for advice in [[x ^ Word4::ONE, y], [x, y ^ Word4::ONE]] {
+    let flip = |m: Montgomery<u64, 4>| Montgomery::from_raw(m.into_raw() ^ Word4::ONE);
+    for advice in [[flip(x), y], [x, flip(y)]] {
         assert_eq!(
             run(Convert::Advised(advice)).u8,
             vec![0u8],

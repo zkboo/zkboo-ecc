@@ -10,7 +10,7 @@ use zkboo::backend::{Backend, BooleanWordRef, Frontend, WordRef};
 use zkboo::circuit::Assertions;
 use zkboo::word::CompositeWord;
 use zkboo_modular::field::FieldRep;
-use zkboo_modular::montgomery::{MontgomeryMod, MontgomeryWord, MontgomeryWordRef};
+use zkboo_modular::montgomery::{Montgomery, MontgomeryMod, MontgomeryWord, MontgomeryWordRef};
 
 /// The Ed25519 base field modulus `p = 2²⁵⁵ - 19`, as a [MontgomeryMod].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -229,7 +229,7 @@ impl<B: Backend> PointRef<B> {
     pub fn to_affine_advised(
         self,
         frontend: &Frontend<B>,
-        advice: Option<[CompositeWord<u64, 4>; 2]>,
+        advice: Option<[Montgomery<u64, 4>; 2]>,
         assertions: &mut Assertions<B>,
     ) -> (Fe25519Ref<B>, Fe25519Ref<B>) {
         let [x_affine, y_affine] = advised_coords(frontend, advice, Ed25519Field);
@@ -250,7 +250,7 @@ impl<B: Backend> PointRef<B> {
     pub fn compress_advised(
         self,
         frontend: &Frontend<B>,
-        advice: Option<[CompositeWord<u64, 4>; 2]>,
+        advice: Option<[Montgomery<u64, 4>; 2]>,
         assertions: &mut Assertions<B>,
     ) -> [WordRef<B, u8>; 32] {
         let (x, y) = self.to_affine_advised(frontend, advice, assertions);
@@ -266,8 +266,8 @@ impl<B: Backend> PointRef<B> {
 
     /// The RFC 8032 encoding of a point already in affine coordinates.
     fn encode(x: Fe25519Ref<B>, y: Fe25519Ref<B>) -> [WordRef<B, u8>; 32] {
-        let sign = x.value().lsb().into();
-        let y = y.value();
+        let sign = x.canonical().lsb().into();
+        let y = y.canonical();
         let mut bytes: Vec<WordRef<B, u8>> = Vec::with_capacity(32);
         for i in 0..4 {
             bytes.extend(y.clone().word_at(i).into_le_bytes());

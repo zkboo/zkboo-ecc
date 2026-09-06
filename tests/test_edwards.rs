@@ -108,11 +108,11 @@ fn test_edwards_host_arithmetic() {
     let b = Point::base();
     let (x2, y2) = b.add(b).to_affine();
     let (x2d, y2d) = b.double().to_affine();
-    assert_eq!(x2.value(), x2d.value());
-    assert_eq!(y2.value(), y2d.value());
+    assert_eq!(x2.canonical(), x2d.canonical());
+    assert_eq!(y2.canonical(), y2d.canonical());
     // Adding the identity is a no-op.
     let (xi, yi) = b.add(Point::identity()).to_affine();
     let (xb, yb) = b.to_affine();
-    assert_eq!(xi.value(), xb.value());
-    assert_eq!(yi.value(), yb.value());
+    assert_eq!(xi.canonical(), xb.canonical());
+    assert_eq!(yi.canonical(), yb.canonical());
 }
