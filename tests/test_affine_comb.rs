@@ -14,7 +14,7 @@ use zkboo::{
     executor::{OwnedFlexibleWordPool, exec},
     word::{CompositeWord, Words},
 };
-use zkboo_ecc::weierstrass::{AffineCombAdvice, Curve, PrecomputedWindowTables, Squaring};
+use zkboo_ecc::weierstrass::{Curve, PrecomputedWindowTables, Squaring};
 use zkboo_ecc::secp256k1::{Secp256k1, Secp256k1PM};
 use zkboo::executor::ExecOptions;
 
@@ -31,26 +31,25 @@ struct AffineCombEqNative<C: Curve<u64, 4>> {
 
 impl<C: Curve<u64, 4>> Circuit for AffineCombEqNative<C> {
     fn exec<B: Backend>(&self, fe: &Frontend<B>) {
-        let mut asserts = Assertions::new();
-        let mut tables = PrecomputedWindowTables::new(self.curve.g(), self.w);
-        let advice = AffineCombAdvice::compute(self.curve, self.scalar, &mut tables);
-        let (x, y) = self.curve.mul_secret_scalar_affine_with(
-            fe,
-            fe.input(self.scalar),
-            &mut tables,
-            &advice,
-            &mut asserts,
-            self.squaring,
-        );
-        // Compare against the native reference in its own (Jacobian) coordinates, by cross
-        // multiplication: `x·Z² == X` and `y·Z³ == Y`. The scalars tested here all have a finite
-        // product, so `Z` is nonzero and the comparison is exact.
-        let [want_x, want_y, want_z] = (self.curve.g() * self.scalar).coords();
-        let want_z2 = want_z * want_z;
-        let want_z3 = want_z2 * want_z;
-        let matches = (x * want_z2).eq_const(want_x) & (y * want_z3).eq_const(want_y);
-        fe.output(matches.into());
-        asserts.output(fe);
+        Assertions::scope(fe, |asserts| {
+            let mut tables = PrecomputedWindowTables::new(self.curve.g(), self.w);
+            let (x, y) = self.curve.mul_secret_scalar_affine_with(
+                fe,
+                fe.input(self.scalar),
+                Some(self.scalar),
+                &mut tables,
+                asserts,
+                self.squaring,
+            );
+            // Compare against the native reference in its own (Jacobian) coordinates, by cross
+            // multiplication: `x·Z² == X` and `y·Z³ == Y`. The scalars tested here all have a
+            // finite product, so `Z` is nonzero and the comparison is exact.
+            let [want_x, want_y, want_z] = (self.curve.g() * self.scalar).coords();
+            let want_z2 = want_z * want_z;
+            let want_z3 = want_z2 * want_z;
+            let matches = (x * want_z2).eq_const(want_x) & (y * want_z3).eq_const(want_y);
+            fe.output(matches.into());
+        });
     }
 }
 
@@ -63,17 +62,16 @@ struct AffineCombOnly<C: Curve<u64, 4>> {
 
 impl<C: Curve<u64, 4>> Circuit for AffineCombOnly<C> {
     fn exec<B: Backend>(&self, fe: &Frontend<B>) {
-        let mut asserts = Assertions::new();
-        let mut tables = PrecomputedWindowTables::new(self.curve.g(), self.w);
-        let advice = AffineCombAdvice::compute(self.curve, self.scalar, &mut tables);
-        let _ = self.curve.mul_secret_scalar_affine(
-            fe,
-            fe.input(self.scalar),
-            &mut tables,
-            &advice,
-            &mut asserts,
-        );
-        asserts.output(fe);
+        Assertions::scope(fe, |asserts| {
+            let mut tables = PrecomputedWindowTables::new(self.curve.g(), self.w);
+            let _ = self.curve.mul_secret_scalar_affine(
+                fe,
+                fe.input(self.scalar),
+                Some(self.scalar),
+                &mut tables,
+                asserts,
+            );
+        });
     }
 }
 

@@ -12,10 +12,11 @@ categories = ["cryptography", "no-std"]
 [dependencies]
 zkboo = { version = "1.2.0", features = ["u64"] }
 zkboo-modular = "1.2.0"
+zeroize = { version = "1.8.2", default-features = false }
 
 [dev-dependencies]
 zkboo = { version = "1.2.0", features = ["u64"] }
 zkboo-profiling = "1.2.0"
+zkboo-circuit-hash = "1.2.0"
 dashu-int = "0.4"
 blake3 = "1.8.3"
-zeroize = "1.8.2"

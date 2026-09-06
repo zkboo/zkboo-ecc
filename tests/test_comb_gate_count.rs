@@ -7,7 +7,7 @@ use zkboo::{
     circuit::{Assertions, Circuit},
     word::CompositeWord,
 };
-use zkboo_ecc::weierstrass::{AffineCombAdvice, Curve, PrecomputedWindowTables, Squaring};
+use zkboo_ecc::weierstrass::{Curve, PrecomputedWindowTables, Squaring};
 use zkboo_ecc::secp256k1::Secp256k1PM;
 use zkboo_modular::montgomery::MontgomeryFrontendIO;
 use zkboo_profiling::profile;
@@ -103,20 +103,19 @@ struct AffineCombAtWidth {
 
 impl Circuit for AffineCombAtWidth {
     fn exec<B: Backend>(&self, fe: &Frontend<B>) {
-        let mut asserts = Assertions::new();
-        let mut tables = PrecomputedWindowTables::new(Secp256k1PM.g(), self.w);
-        let advice = AffineCombAdvice::compute(Secp256k1PM, self.scalar, &mut tables);
-        let (x, y) = Secp256k1PM.mul_secret_scalar_affine_with(
-            fe,
-            fe.input(self.scalar),
-            &mut tables,
-            &advice,
-            &mut asserts,
-            self.squaring,
-        );
-        fe.montgomery_output(x);
-        fe.montgomery_output(y);
-        asserts.output(fe);
+        Assertions::scope(fe, |asserts| {
+            let mut tables = PrecomputedWindowTables::new(Secp256k1PM.g(), self.w);
+            let (x, y) = Secp256k1PM.mul_secret_scalar_affine_with(
+                fe,
+                fe.input(self.scalar),
+                Some(self.scalar),
+                &mut tables,
+                asserts,
+                self.squaring,
+            );
+            fe.montgomery_output(x);
+            fe.montgomery_output(y);
+        });
     }
 }
 

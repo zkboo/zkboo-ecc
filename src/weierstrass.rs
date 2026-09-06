@@ -12,6 +12,7 @@ use zkboo::{
     circuit::Assertions,
     word::{CompositeWord, Word, WordLike},
 };
+use zeroize::Zeroize;
 use zkboo_modular::field::FieldRep;
 use zkboo_modular::montgomery::{
     MontgomeryBooleanWordRefSelector, MontgomeryFrontendIO, MontgomeryMod, MontgomeryWord,
@@ -139,12 +140,15 @@ pub trait Curve<W: Word, const N: usize>: Clone + Copy + PartialEq + Eq + Debug 
 
     /// Fixed-base scalar multiplication by a **secret** scalar, accumulating in affine coordinates
     /// and returning the affine result `(x, y)` directly.
+    ///
+    /// `scalar_value` is the scalar itself when proving or executing, and `None` when replaying a
+    /// view, fingerprinting or profiling.
     fn mul_secret_scalar_affine<B: Backend>(
         &self,
         frontend: &Frontend<B>,
         scalar: WordRef<B, W, N>,
+        scalar_value: Option<CompositeWord<W, N>>,
         tables: &mut impl WindowTables<W, N, Self>,
-        advice: &AffineCombAdvice<W, N>,
         assertions: &mut Assertions<B>,
     ) -> (
         MontgomeryWordRef<B, W, N, Self::P>,
@@ -153,8 +157,8 @@ pub trait Curve<W: Word, const N: usize>: Clone + Copy + PartialEq + Eq + Debug 
         return self.mul_secret_scalar_affine_with(
             frontend,
             scalar,
+            scalar_value,
             tables,
-            advice,
             assertions,
             Squaring::default(),
         );
@@ -166,8 +170,8 @@ pub trait Curve<W: Word, const N: usize>: Clone + Copy + PartialEq + Eq + Debug 
         &self,
         frontend: &Frontend<B>,
         scalar: WordRef<B, W, N>,
+        scalar_value: Option<CompositeWord<W, N>>,
         tables: &mut impl WindowTables<W, N, Self>,
-        advice: &AffineCombAdvice<W, N>,
         assertions: &mut Assertions<B>,
         squaring: Squaring,
     ) -> (
@@ -183,12 +187,8 @@ pub trait Curve<W: Word, const N: usize>: Clone + Copy + PartialEq + Eq + Debug 
             "the affine comb needs a window width that does not divide the scalar width, got {}",
             tables.window_bits()
         );
-        assert_eq!(
-            advice.len(),
-            num_windows,
-            "the affine comb needs one slope per window, plus a tangent at the last"
-        );
-        let mut next_slope = 0usize;
+        let mut mirror =
+            scalar_value.map(|d| CombMirror::new(*self, d, tables.window_bits()));
         let mut acc: Option<(
             MontgomeryWordRef<B, W, N, Self::P>,
             MontgomeryWordRef<B, W, N, Self::P>,
@@ -196,12 +196,18 @@ pub trait Curve<W: Word, const N: usize>: Clone + Copy + PartialEq + Eq + Debug 
         for k in 0..num_windows {
             let is_top = k + 1 == num_windows;
             let (sign_neg, index_bits) = recoding.next_digit();
-            let (x2, y2) =
-                select_signed_affine::<B, W, N, Self>(&index_bits, sign_neg, tables.window(k));
+            // One table request per window, its result shared by the oblivious select and the host
+            // mirror: a comb table source is free to build each window on demand and to insist on
+            // ascending access, so there is no second request to be had.
+            let window = tables.window(k);
+            let (x2, y2) = select_signed_affine::<B, W, N, Self>(&index_bits, sign_neg, window);
+            if let Some(mirror) = mirror.as_mut() {
+                mirror.advance(window);
+            }
             acc = Some(match acc {
                 None => (x2, y2),
                 Some((x1, y1)) if !is_top => {
-                    let lambda = advice.input(frontend, &mut next_slope, field);
+                    let lambda = input_slope(frontend, &mut mirror, field);
                     let dx = x2.clone() - x1.clone();
                     // The two together are exactly the genericity precondition of a chord: the
                     // slope is what the line through the two points has, and there is a line.
@@ -212,8 +218,8 @@ pub trait Curve<W: Word, const N: usize>: Clone + Copy + PartialEq + Eq + Debug 
                     affine_add_from_slope(lambda, x1, y1, x2, squaring)
                 }
                 Some((x1, y1)) => {
-                    let chord = advice.input(frontend, &mut next_slope, field);
-                    let tangent = advice.input(frontend, &mut next_slope, field);
+                    let chord = input_slope(frontend, &mut mirror, field);
+                    let tangent = input_slope(frontend, &mut mirror, field);
                     let same_x = x1.clone().eq(x2.clone());
                     // Opposite points sum to infinity, which has no affine coordinates. Assert the
                     // case away rather than select around it: a select would have to produce
@@ -330,8 +336,7 @@ impl<B: Backend, W: Word, const N: usize> CombRecoding<B, W, N> {
     }
 }
 
-/// The cleartext mirror of [`CombRecoding`], for the host pass that computes the affine comb's
-/// advice.
+/// The cleartext mirror of [`CombRecoding`], driven by [`CombMirror`].
 struct HostCombRecoding<W: Word, const N: usize> {
     t: CompositeWord<W, N>,
     carry: bool,
@@ -396,88 +401,118 @@ impl<W: Word, const N: usize> HostCombRecoding<W, N> {
     }
 }
 
-/// The slopes [`Curve::mul_secret_scalar_affine`] needs, computed on the host.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AffineCombAdvice<W: Word, const N: usize> {
-    slopes: Vec<CompositeWord<W, N>>,
+impl<W: Word, const N: usize> Zeroize for HostCombRecoding<W, N> {
+    /// Zeroizes the residual, the only witness-derived value the recoding holds.
+    fn zeroize(&mut self) {
+        self.t.zeroize();
+    }
 }
 
-impl<W: Word, const N: usize> AffineCombAdvice<W, N> {
-    /// Mirrors the affine comb on the host, collecting the slope it needs at each window.
-    pub fn compute<C: Curve<W, N>>(
-        curve: C,
-        scalar: CompositeWord<W, N>,
-        tables: &mut impl WindowTables<W, N, C>,
-    ) -> Self {
-        let field = curve.p();
-        let width = W::WIDTH * N;
-        let mut recoding = HostCombRecoding::new(scalar, curve.n(), tables.window_bits());
-        let num_windows = recoding.num_windows();
-        assert!(
-            tables.window_bits() * (num_windows - 1) < width,
-            "the affine comb needs a window width that does not divide the scalar width, got {}",
-            tables.window_bits()
-        );
-        let mut slopes: Vec<CompositeWord<W, N>> = Vec::with_capacity(num_windows);
-        let mut acc: Option<(MontgomeryWord<W, N, C::P>, MontgomeryWord<W, N, C::P>)> = None;
-        for k in 0..num_windows {
-            let is_top = k + 1 == num_windows;
-            let (sign_neg, index) = recoding.next_digit();
-            let entry = tables.window(k)[index];
-            let x2 = entry[0];
-            let y2 = if sign_neg { -entry[1] } else { entry[1] };
-            acc = Some(match acc {
-                None => (x2, y2),
-                Some((x1, y1)) if !is_top => {
-                    let lambda = host_chord_slope(x1, y1, x2, y2, field);
-                    slopes.push(lambda.into_inner());
-                    host_affine_add(lambda, x1, y1, x2)
-                }
-                Some((x1, y1)) => {
-                    let chord = host_chord_slope(x1, y1, x2, y2, field);
-                    let tangent = host_tangent_slope(x1, y1, curve.a(), field);
-                    // The circuit asks for the chord first and the tangent second, and consumes
-                    // them in that order; the order here is the interface.
-                    slopes.push(chord.into_inner());
-                    slopes.push(tangent.into_inner());
-                    let lambda = if x1 == x2 { tangent } else { chord };
-                    host_affine_add(lambda, x1, y1, x2)
-                }
-            });
-        }
-        let _ = acc.expect("at least one window");
-        debug_assert_eq!(slopes.len(), num_windows, "advice length is the window count");
-        return Self { slopes };
-    }
+/// The host mirror of the affine comb, yielding the slopes the circuit asks for as it reaches them.
+///
+/// It holds the residual of the recoding and the running affine accumulator, and nothing else: the
+/// slope for a window is a function of both, so they are the smallest state the algorithm admits.
+/// The whole of it is erased on drop.
+struct CombMirror<W: Word, const N: usize, C: Curve<W, N>> {
+    recoding: HostCombRecoding<W, N>,
+    /// The running affine accumulator, `None` until the first window has been consumed.
+    acc: Option<(MontgomeryWord<W, N, C::P>, MontgomeryWord<W, N, C::P>)>,
+    /// The slopes the last window yielded and the circuit has not yet asked for, in order.
+    stash: [Option<CompositeWord<W, N>>; 2],
+    curve: C,
+}
 
-    /// The advice's shape without its values, for a verifier: `comb_window_count` zeros.
-    pub fn zeros(width: usize, window_bits: usize) -> Self {
+impl<W: Word, const N: usize, C: Curve<W, N>> CombMirror<W, N, C> {
+    /// Starts the mirror of the given scalar at the given window width.
+    fn new(curve: C, scalar: CompositeWord<W, N>, window_bits: usize) -> Self {
         return Self {
-            slopes: alloc::vec![CompositeWord::<W, N>::ZERO; comb_window_count(width, window_bits)],
+            recoding: HostCombRecoding::new(scalar, curve.n(), window_bits),
+            acc: None,
+            stash: [None, None],
+            curve,
         };
     }
 
-    /// How many slopes this holds.
-    pub fn len(&self) -> usize {
-        return self.slopes.len();
+    /// Consumes the given window's table, stashing the slopes it yields.
+    ///
+    /// The first window yields none, each middle window a chord, and the top window a chord and a
+    /// tangent, in the order the circuit asks for them.
+    fn advance(&mut self, window: &[[MontgomeryWord<W, N, C::P>; 3]]) {
+        debug_assert!(
+            self.stash.iter().all(Option::is_none),
+            "a window's slopes were stashed and never consumed"
+        );
+        let field = self.curve.p();
+        let is_top = self.recoding.next_k + 1 == self.recoding.num_windows();
+        let (sign_neg, index) = self.recoding.next_digit();
+        let entry = window[index];
+        let x2 = entry[0];
+        let y2 = if sign_neg { -entry[1] } else { entry[1] };
+        self.acc = Some(match self.acc {
+            None => (x2, y2),
+            Some((x1, y1)) if !is_top => {
+                let lambda = host_chord_slope(x1, y1, x2, y2, field);
+                self.stash[0] = Some(lambda.into_inner());
+                host_affine_add(lambda, x1, y1, x2)
+            }
+            Some((x1, y1)) => {
+                let chord = host_chord_slope(x1, y1, x2, y2, field);
+                let tangent = host_tangent_slope(x1, y1, self.curve.a(), field);
+                self.stash[0] = Some(chord.into_inner());
+                self.stash[1] = Some(tangent.into_inner());
+                let lambda = if x1 == x2 { tangent } else { chord };
+                host_affine_add(lambda, x1, y1, x2)
+            }
+        });
     }
 
-    /// Whether this holds no slopes at all.
-    pub fn is_empty(&self) -> bool {
-        return self.slopes.is_empty();
+    /// The next stashed slope.
+    fn take_slope(&mut self) -> CompositeWord<W, N> {
+        for slot in self.stash.iter_mut() {
+            if let Some(slope) = slot.take() {
+                return slope;
+            }
+        }
+        panic!("the comb asked for a slope the window did not yield");
     }
+}
 
-    /// The next slope, allocated as an input in the given frontend.
-    pub(crate) fn input<B: Backend, M: FieldRep<W, N>>(
-        &self,
-        frontend: &Frontend<B>,
-        next: &mut usize,
-        field: M,
-    ) -> MontgomeryWordRef<B, W, N, M> {
-        let value = self.slopes[*next];
-        *next += 1;
-        return MontgomeryWordRef::from_inner(frontend.input(value), field);
+impl<W: Word, const N: usize, C: Curve<W, N>> Zeroize for CombMirror<W, N, C> {
+    /// Zeroizes the residual, the accumulator and any stashed slope.
+    fn zeroize(&mut self) {
+        self.recoding.zeroize();
+        if let Some((x, y)) = self.acc.as_mut() {
+            x.zeroize();
+            y.zeroize();
+        }
+        for slot in self.stash.iter_mut() {
+            if let Some(slope) = slot.as_mut() {
+                slope.zeroize();
+            }
+        }
     }
+}
+
+impl<W: Word, const N: usize, C: Curve<W, N>> Drop for CombMirror<W, N, C> {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+/// Allocates the comb's next slope as a circuit input.
+///
+/// With no mirror there is no scalar to mirror, and the value is the zero word: a backend that
+/// replays a view, fingerprints a circuit or profiles one discards every input value it is given.
+fn input_slope<B: Backend, W: Word, const N: usize, C: Curve<W, N>, M: FieldRep<W, N>>(
+    frontend: &Frontend<B>,
+    mirror: &mut Option<CombMirror<W, N, C>>,
+    field: M,
+) -> MontgomeryWordRef<B, W, N, M> {
+    let value = match mirror {
+        Some(mirror) => mirror.take_slope(),
+        None => CompositeWord::<W, N>::ZERO,
+    };
+    return MontgomeryWordRef::from_inner(frontend.input(value), field);
 }
 
 /// The chord slope `(Y2 − Y1) / (X2 − X1)`, on the host.
@@ -1527,5 +1562,31 @@ impl<B: Backend, W: Word, const N: usize, C: Curve<W, N>> PointFrontendIO<B, W, 
         self.montgomery_output(x);
         self.montgomery_output(y);
         self.montgomery_output(z);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::secp256k1::Secp256k1PM;
+
+    /// Every witness-derived word the mirror carries is erased when it goes out of scope.
+    #[test]
+    fn a_mirror_erases_what_it_carries() {
+        let scalar = CompositeWord::<u64, 4>::from_le_words([1, 2, 3, 4]);
+        let mut tables = PrecomputedWindowTables::new(Secp256k1PM.g(), DEFAULT_COMB_WINDOW_BITS);
+        let mut mirror = CombMirror::new(Secp256k1PM, scalar, DEFAULT_COMB_WINDOW_BITS);
+        mirror.advance(tables.window(0));
+        mirror.advance(tables.window(1));
+        assert_ne!(mirror.recoding.t, CompositeWord::ZERO, "nothing to erase");
+        assert!(mirror.stash.iter().any(Option::is_some), "no slope stashed");
+        mirror.zeroize();
+        assert_eq!(mirror.recoding.t, CompositeWord::ZERO);
+        let (x, y) = mirror.acc.expect("the accumulator is set after two windows");
+        assert_eq!(x.into_inner(), CompositeWord::ZERO);
+        assert_eq!(y.into_inner(), CompositeWord::ZERO);
+        for slot in mirror.stash.iter() {
+            assert_eq!(slot.unwrap_or(CompositeWord::ZERO), CompositeWord::ZERO);
+        }
     }
 }
