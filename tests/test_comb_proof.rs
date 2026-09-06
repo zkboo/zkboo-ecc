@@ -27,7 +27,7 @@ use zkboo::{
     verifier::{replay::OwnedFlexibleWordPairPool, verify},
     word::{CompositeWord, Words},
 };
-use zkboo_ecc::weierstrass::{AffineCombAdvice, 
+use zkboo_ecc::weierstrass::{
     Curve, HOST_COMB_WINDOW_BITS, PointFrontendIO, PrecomputedWindowTables, Squaring,
 };
 use zkboo_ecc::secp256k1::Secp256k1PM;
@@ -36,6 +36,7 @@ use zkboo::executor::ExecOptions;
 use zkboo::prover::proof::ProofOptions;
 use zkboo::verifier::VerifyOptions;
 use zeroize::Zeroize;
+use zkboo_profiling::profile;
 
 /// A [Hasher] backed by BLAKE3, producing 32-byte digests.
 #[derive(Debug)]
@@ -94,20 +95,61 @@ struct AffineComb {
 
 impl Circuit for AffineComb {
     fn exec<B: Backend>(&self, fe: &Frontend<B>) {
-        let mut asserts = Assertions::new();
-        let mut tables = PrecomputedWindowTables::new(Secp256k1PM.g(), WINDOW_BITS);
-        let advice = AffineCombAdvice::compute(Secp256k1PM, self.scalar, &mut tables);
-        let (x, y) = Secp256k1PM.mul_secret_scalar_affine_with(
-            fe,
-            fe.input(self.scalar),
-            &mut tables,
-            &advice,
-            &mut asserts,
-            self.squaring,
-        );
-        fe.montgomery_output(x);
-        fe.montgomery_output(y);
-        asserts.output(fe);
+        Assertions::scope(fe, |asserts| {
+            let mut tables = PrecomputedWindowTables::new(Secp256k1PM.g(), WINDOW_BITS);
+            let (x, y) = Secp256k1PM.mul_secret_scalar_affine_with(
+                fe,
+                fe.input(self.scalar),
+                Some(self.scalar),
+                &mut tables,
+                asserts,
+                self.squaring,
+            );
+            fe.montgomery_output(x);
+            fe.montgomery_output(y);
+        });
+    }
+}
+
+/// `d·G` through the affine comb, with the host mirror made an explicit choice: the prover holds
+/// the scalar to mirror and the verifier does not.
+struct AffineCombFor {
+    scalar: CompositeWord<u64, 4>,
+    scalar_value: Option<CompositeWord<u64, 4>>,
+}
+
+impl AffineCombFor {
+    /// The prover's view: the scalar, and the scalar again to mirror.
+    fn prover() -> Self {
+        return Self {
+            scalar: scalar(),
+            scalar_value: Some(scalar()),
+        };
+    }
+
+    /// The verifier's view: no input values and nothing to mirror.
+    fn verifier() -> Self {
+        return Self {
+            scalar: CompositeWord::ZERO,
+            scalar_value: None,
+        };
+    }
+}
+
+impl Circuit for AffineCombFor {
+    fn exec<B: Backend>(&self, fe: &Frontend<B>) {
+        Assertions::scope(fe, |asserts| {
+            let mut tables = PrecomputedWindowTables::new(Secp256k1PM.g(), WINDOW_BITS);
+            let (x, y) = Secp256k1PM.mul_secret_scalar_affine(
+                fe,
+                fe.input(self.scalar),
+                self.scalar_value,
+                &mut tables,
+                asserts,
+            );
+            fe.montgomery_output(x);
+            fe.montgomery_output(y);
+        });
     }
 }
 
@@ -225,25 +267,63 @@ fn the_host_window_width_also_proves_and_verifies() {
     struct WideComb;
     impl Circuit for WideComb {
         fn exec<B: Backend>(&self, fe: &Frontend<B>) {
-            let mut asserts = Assertions::new();
-            let mut tables = PrecomputedWindowTables::new(Secp256k1PM.g(), HOST_COMB_WINDOW_BITS);
-            let advice = AffineCombAdvice::compute(Secp256k1PM, scalar(), &mut tables);
-            let scalar: WordRef<B, u64, 4> = fe.input(scalar());
-            let (x, y) = Secp256k1PM.mul_secret_scalar_affine(
-                fe,
-                scalar,
-                &mut tables,
-                &advice,
-                &mut asserts,
-            );
-            fe.montgomery_output(x);
-            fe.montgomery_output(y);
-            asserts.output(fe);
+            Assertions::scope(fe, |asserts| {
+                let mut tables =
+                    PrecomputedWindowTables::new(Secp256k1PM.g(), HOST_COMB_WINDOW_BITS);
+                let scalar_ref: WordRef<B, u64, 4> = fe.input(scalar());
+                let (x, y) = Secp256k1PM.mul_secret_scalar_affine(
+                    fe,
+                    scalar_ref,
+                    Some(scalar()),
+                    &mut tables,
+                    asserts,
+                );
+                fe.montgomery_output(x);
+                fe.montgomery_output(y);
+            });
         }
     }
     let expected_output = exec::<_, WP, _>(&WideComb, ExecOptions::new());
     assert!(
         prove_and_verify(&WideComb, &expected_output),
         "a proof at the host window width did not verify"
+    );
+}
+
+#[test]
+fn a_verifier_that_mirrors_no_scalar_runs_the_same_circuit() {
+    // The host mirror is not a gate: whether the caller holds a scalar to mirror decides only
+    // where a slope's value comes from, never what the circuit does with it.
+    assert_eq!(
+        format!("{:?}", profile(&AffineCombFor::prover())),
+        format!("{:?}", profile(&AffineCombFor::verifier())),
+        "mirroring a scalar changed the circuit"
+    );
+}
+
+#[test]
+#[ignore = "proves and verifies a full secp256k1 statement; run explicitly in release mode"]
+fn a_verifier_that_mirrors_no_scalar_still_verifies() {
+    let prover = AffineCombFor::prover();
+    let expected_output = exec::<_, WP, _>(&prover, ExecOptions::new());
+    assert_eq!(expected_output.u8, vec![1u8], "assertions not satisfied");
+    let proof = prove::<_, H, PS, PV, S, _, WTP, _>(
+        &prover,
+        NUM_ITERS,
+        SEED_ENTROPY,
+        BINDING,
+        ProofOptions::new(),
+    );
+    let is_valid = verify::<_, H, PV, S, WPP, _>(
+        &AffineCombFor::verifier(),
+        &expected_output,
+        &proof,
+        BINDING,
+        VerifyOptions::new(),
+    )
+    .expect("verification errored");
+    assert!(
+        is_valid,
+        "a verifier holding no scalar to mirror failed to verify an honest proof"
     );
 }
