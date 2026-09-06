@@ -22,6 +22,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   Asserting a pair of coordinates costs two field multiplications; computing the inverse costs a full run of divsteps, some ninety thousand AND messages at 256 bits.
   Unlike the computed forms these reject the point at infinity, which has no affine coordinates, by making the assertion false.
 
+### Changed
+
+- The advised affine conversions take their coordinates as `Montgomery` rather than as bare words, so a canonical residue cannot be passed where a stored value is meant.
+  That confusion is invisible on the pseudo-Mersenne secp256k1 field, where the two representations coincide, and silently makes every assertion false on Ed25519.
+
 ### Removed
 
 - `AffineCombAdvice`, along with its `compute`, `zeros`, `len` and `is_empty`.

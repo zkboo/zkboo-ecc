@@ -34,7 +34,7 @@ fn p() -> UBig {
 /// Canonical (x, y, z) of a curve point, decoded out of its field representation.
 fn coords<C: Curve<u64, 4>>(pt: &Point<u64, 4, C>) -> (UBig, UBig, UBig) {
     let [x, y, z] = pt.coords();
-    (to_ubig(x.value()), to_ubig(y.value()), to_ubig(z.value()))
+    (to_ubig(x.canonical()), to_ubig(y.canonical()), to_ubig(z.canonical()))
 }
 
 /// Projective equality of two Jacobian points over the same prime: x1·z2² ≡ x2·z1² and
