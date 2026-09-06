@@ -499,6 +499,19 @@ impl<W: Word, const N: usize, C: Curve<W, N>> Drop for CombMirror<W, N, C> {
     }
 }
 
+/// Allocates a pair of advised affine coordinates as circuit inputs.
+///
+/// With no advice there is nothing to allocate from, and the values are zero words: a backend that
+/// replays a view, fingerprints a circuit or profiles one discards every input value it is given.
+pub(crate) fn advised_coords<B: Backend, W: Word, const N: usize, M: FieldRep<W, N>>(
+    frontend: &Frontend<B>,
+    advice: Option<[CompositeWord<W, N>; 2]>,
+    field: M,
+) -> [MontgomeryWordRef<B, W, N, M>; 2] {
+    let values = advice.unwrap_or([CompositeWord::<W, N>::ZERO; 2]);
+    return values.map(|value| MontgomeryWordRef::from_inner(frontend.input(value), field));
+}
+
 /// Allocates the comb's next slope as a circuit input.
 ///
 /// With no mirror there is no scalar to mirror, and the value is the zero word: a backend that
@@ -1258,6 +1271,34 @@ impl<B: Backend, W: Word, const N: usize, C: Curve<W, N>> PointRef<B, W, N, C> {
         let y_affine = y * z_inv_sq * z_inv;
         let z_affine = z.into_const(CompositeWord::ONE);
         return Self::_inf_or_jacobian(is_inf, x_affine, y_affine, z_affine, curve);
+    }
+
+    /// [`PointRef::to_affine`] with the affine coordinates taken as advice and asserted rather
+    /// than computed.
+    ///
+    /// `advice` is the point's affine coordinates when proving or executing, and `None` when
+    /// replaying a view, fingerprinting or profiling. Unlike [`PointRef::to_affine`] this rejects
+    /// the point at infinity, which has no affine coordinates, by making the assertion false.
+    pub fn to_affine_advised(
+        self,
+        frontend: &Frontend<B>,
+        advice: Option<[CompositeWord<W, N>; 2]>,
+        assertions: &mut Assertions<B>,
+    ) -> Self {
+        let (x, y, z, curve) = self.destructure();
+        let field = curve.p();
+        let [x_affine, y_affine] = advised_coords(frontend, advice, field);
+        // A projective point is (X : Y : Z) = (x·Z², y·Z³ : Z), so the two products below pin the
+        // advice exactly — provided Z is not zero, where they would say nothing.
+        z.clone().is_nonzero().assert_into(assertions);
+        let z_squared = z.clone() * z.clone();
+        let z_cubed = z_squared.clone() * z.clone();
+        (x_affine.clone() * z_squared)
+            .eq(x)
+            .assert_into(assertions);
+        (y_affine.clone() * z_cubed).eq(y).assert_into(assertions);
+        let z_affine = z.into_const(CompositeWord::ONE);
+        return Self::_jacobian(x_affine, y_affine, z_affine, curve);
     }
 
     /// Point doubling on the [Curve].
