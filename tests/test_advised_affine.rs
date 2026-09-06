@@ -14,7 +14,7 @@ use zkboo::{
 };
 use zkboo_ecc::secp256k1::Secp256k1PM;
 use zkboo_ecc::weierstrass::{Curve, PrecomputedWindowTables};
-use zkboo_modular::montgomery::Montgomery;
+use zkboo_modular::montgomery::{Montgomery, MontgomeryFrontendIO};
 use zkboo_profiling::profile;
 
 type WP = OwnedFlexibleWordPool<usize>;
@@ -56,8 +56,8 @@ impl Circuit for Statement {
             // is a different word for a Montgomery modulus and the same one for a pseudo-Mersenne
             // modulus — so getting this wrong is invisible on this curve and fatal on Ed25519.
             let [x, y, _] = out.into_coords();
-            fe.output(x.into_inner());
-            fe.output(y.into_inner());
+            fe.montgomery_output_inner(x);
+            fe.montgomery_output_inner(y);
         });
     }
 }
