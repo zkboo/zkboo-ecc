@@ -5,7 +5,9 @@
 
 use crate::weierstrass::select_const_coord;
 use alloc::vec::Vec;
-use zkboo::backend::{Backend, BooleanWordRef, WordRef};
+use crate::weierstrass::advised_coords;
+use zkboo::backend::{Backend, BooleanWordRef, Frontend, WordRef};
+use zkboo::circuit::Assertions;
 use zkboo::word::CompositeWord;
 use zkboo_modular::field::FieldRep;
 use zkboo_modular::montgomery::{MontgomeryMod, MontgomeryWord, MontgomeryWordRef};
@@ -219,10 +221,51 @@ impl<B: Backend> PointRef<B> {
         return (self.x * z_inv.clone(), self.y * z_inv);
     }
 
+    /// [`PointRef::to_affine`] with the affine coordinates taken as advice and asserted rather
+    /// than computed.
+    ///
+    /// `advice` is the point's affine coordinates when proving or executing, and `None` when
+    /// replaying a view, fingerprinting or profiling.
+    pub fn to_affine_advised(
+        self,
+        frontend: &Frontend<B>,
+        advice: Option<[CompositeWord<u64, 4>; 2]>,
+        assertions: &mut Assertions<B>,
+    ) -> (Fe25519Ref<B>, Fe25519Ref<B>) {
+        let [x_affine, y_affine] = advised_coords(frontend, advice, Ed25519Field);
+        // Extended homogeneous coordinates are (X : Y : Z) = (x·Z : y·Z : Z), so the two products
+        // below pin the advice exactly — provided Z is not zero, where they would say nothing.
+        self.z.clone().is_nonzero().assert_into(assertions);
+        (x_affine.clone() * self.z.clone())
+            .eq(self.x)
+            .assert_into(assertions);
+        (y_affine.clone() * self.z.clone())
+            .eq(self.y)
+            .assert_into(assertions);
+        return (x_affine, y_affine);
+    }
+
+    /// [`PointRef::compress`] with the affine coordinates taken as advice and asserted rather than
+    /// computed.
+    pub fn compress_advised(
+        self,
+        frontend: &Frontend<B>,
+        advice: Option<[CompositeWord<u64, 4>; 2]>,
+        assertions: &mut Assertions<B>,
+    ) -> [WordRef<B, u8>; 32] {
+        let (x, y) = self.to_affine_advised(frontend, advice, assertions);
+        return Self::encode(x, y);
+    }
+
     /// The 32-byte RFC 8032 point encoding: `y` in little-endian with the parity of `x` in the top
     /// bit of the final byte.
     pub fn compress(self) -> [WordRef<B, u8>; 32] {
         let (x, y) = self.to_affine();
+        return Self::encode(x, y);
+    }
+
+    /// The RFC 8032 encoding of a point already in affine coordinates.
+    fn encode(x: Fe25519Ref<B>, y: Fe25519Ref<B>) -> [WordRef<B, u8>; 32] {
         let sign = x.value().lsb().into();
         let y = y.value();
         let mut bytes: Vec<WordRef<B, u8>> = Vec::with_capacity(32);
