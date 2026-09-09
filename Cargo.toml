@@ -1,6 +1,6 @@
 [package]
 name = "zkboo-ecc"
-version = "1.2.0"
+version = "1.2.1"
 edition = "2024"
 description = "Elliptic curve cryptography primitives for the ZKBoo ecosystem."
 license = "LGPL-3.0-or-later"
@@ -10,12 +10,12 @@ keywords = ["zk", "zero-knowledge", "zkboo"]
 categories = ["cryptography", "no-std"]
 
 [dependencies]
-zkboo = { version = "1.2.0", features = ["u64"] }
-zkboo-modular = "1.2.0"
+zkboo = { version = "1.2.1", features = ["u64"] }
+zkboo-modular = "1.2.1"
 zeroize = { version = "1.8.2", default-features = false }
 
 [dev-dependencies]
-zkboo = { version = "1.2.0", features = ["u64"] }
+zkboo = { version = "1.2.1", features = ["u64"] }
 zkboo-profiling = "1.2.0"
 zkboo-circuit-hash = "1.2.0"
 dashu-int = "0.4"
