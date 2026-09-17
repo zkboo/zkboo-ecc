@@ -6,7 +6,8 @@
 //! it rests on advice, which only exists in the prover, and on assertions, which only bite when a
 //! verifier checks the word they accumulate into. The prover shares advice as it shares an input
 //! and the verifier replays it as one — so nothing but a real proof exercises the seam between
-//! them, over a statement with a hint and an assertion per window rather than one of each.
+//! them, over a statement with advice and assertions in every window after the first rather than
+//! one of each.
 //!
 //! Proving one is seconds in release and many minutes in debug, so the proving tests here are
 //! `#[ignore]`d and meant to be run explicitly:
@@ -14,9 +15,6 @@
 //! ```text
 //!   cargo test --release -p zkboo-ecc --test test_comb_proof -- --ignored
 //! ```
-//!
-//! The cheap end of the same seam — a hinted inverse, proved and verified — runs by default in
-//! `zkboo-modular`.
 
 use zkboo::{
     backend::{Backend, Frontend, WordRef},
@@ -153,7 +151,7 @@ impl Circuit for AffineCombFor {
     }
 }
 
-/// The same, through the Jacobian comb, so the hint-free path is covered too.
+/// The same, through the Jacobian comb, so the advice-free path is covered too.
 struct JacobianComb {
     scalar: CompositeWord<u64, 4>,
 }
