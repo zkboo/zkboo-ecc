@@ -197,18 +197,18 @@ fn the_doubling_branch_of_the_last_window_is_covered() {
             9,
             CompositeWord::from_be_words([
                 0xe000000000000000,
-                0x0000000000000000,
                 0x0000000000000001,
                 0x4551231950b75fc4,
+                0x402da1732fc9bebf,
             ]),
         ),
         (
             11,
             CompositeWord::from_be_words([
                 0xc000000000000000,
-                0x0000000000000000,
                 0x0000000000000001,
                 0x4551231950b75fc4,
+                0x402da1732fc9bebf,
             ]),
         ),
     ];
