@@ -6,6 +6,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+
+- The proving test names the number of repetitions it verifies, as `zkboo` now requires.
+
 ### Fixed
 
 - The affine comb's test of the last window's doubling branch uses scalars that reach that branch at window widths 9 and 11; the previous ones reached it at no width.
