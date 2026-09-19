@@ -16,6 +16,11 @@
 //!   cargo test --release -p zkboo-ecc --test test_comb_proof -- --ignored
 //! ```
 
+use zeroize::Zeroize;
+use zkboo::Repetitions;
+use zkboo::executor::ExecOptions;
+use zkboo::prover::proof::ProofOptions;
+use zkboo::verifier::VerifyOptions;
 use zkboo::{
     backend::{Backend, Frontend, WordRef},
     circuit::{Assertions, Circuit},
@@ -25,15 +30,11 @@ use zkboo::{
     verifier::{replay::OwnedFlexibleWordPairPool, verify},
     word::{CompositeWord, Words},
 };
+use zkboo_ecc::secp256k1::Secp256k1PM;
 use zkboo_ecc::weierstrass::{
     Curve, HOST_COMB_WINDOW_BITS, PointFrontendIO, PrecomputedWindowTables, Squaring,
 };
-use zkboo_ecc::secp256k1::Secp256k1PM;
 use zkboo_modular::montgomery::MontgomeryFrontendIO;
-use zkboo::executor::ExecOptions;
-use zkboo::prover::proof::ProofOptions;
-use zkboo::verifier::VerifyOptions;
-use zeroize::Zeroize;
 use zkboo_profiling::profile;
 
 /// A [Hasher] backed by BLAKE3, producing 32-byte digests.
@@ -165,9 +166,22 @@ impl Circuit for JacobianComb {
 }
 
 fn prove_and_verify<C: Circuit + Sync>(circuit: &C, expected_output: &Words) -> bool {
-    let proof = prove::<_, H, PS, PV, S, _, WTP, _>(circuit, NUM_ITERS, SEED_ENTROPY, BINDING, ProofOptions::new());
-    return verify::<_, H, PV, S, WPP, _>(circuit, expected_output, &proof, BINDING, VerifyOptions::new())
-        .expect("verification errored");
+    let proof = prove::<_, H, PS, PV, S, _, WTP, _>(
+        circuit,
+        NUM_ITERS,
+        SEED_ENTROPY,
+        BINDING,
+        ProofOptions::new(),
+    );
+    return verify::<_, H, PV, S, WPP, _>(
+        circuit,
+        expected_output,
+        &proof,
+        BINDING,
+        Repetitions::exactly(NUM_ITERS),
+        VerifyOptions::new(),
+    )
+    .expect("verification errored");
 }
 
 fn scalar() -> CompositeWord<u64, 4> {
@@ -210,10 +224,13 @@ fn the_jacobian_comb_proves_and_verifies() {
 
 #[test]
 fn the_affine_comb_and_the_jacobian_comb_agree() {
-    let affine = exec::<_, WP, _>(&AffineComb {
-        scalar: scalar(),
-        squaring: Squaring::Multiplication,
-    }, ExecOptions::new());
+    let affine = exec::<_, WP, _>(
+        &AffineComb {
+            scalar: scalar(),
+            squaring: Squaring::Multiplication,
+        },
+        ExecOptions::new(),
+    );
     let jacobian = exec::<_, WP, _>(&JacobianComb { scalar: scalar() }, ExecOptions::new());
     // The affine comb asserts, so it emits a flag the Jacobian one has no reason to; the
     // coordinates are what has to agree.
@@ -317,6 +334,7 @@ fn a_verifier_that_mirrors_no_scalar_still_verifies() {
         &expected_output,
         &proof,
         BINDING,
+        Repetitions::exactly(NUM_ITERS),
         VerifyOptions::new(),
     )
     .expect("verification errored");
